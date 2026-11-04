@@ -1,0 +1,11 @@
+{
+  "synthetic": true,
+  "_note": "SYNTHETIC classification entries; codes ZXA/ZXB/ZXC are invented for the demo.",
+  "records": [
+    {"product_code": "ZXA", "device_name": "Electrocardiograph, ambulatory, with arrhythmia detection (synthetic)",
+     "device_class": "2", "regulation_number": "000.0001", "medical_specialty_description": "Cardiovascular",
+     "definition": "Synthetic entry: a wearable device that records ECG and applies an algorithm to flag arrhythmias."},
+    {"product_code": "ZXB", "device_name": "Screw, fixation, bone (synthetic)", "device_class": "2",
+     "regulation_number": "000.0002", "medical_specialty_description": "Orthopedic", "definition": "Synthetic entry."}
+  ]
+}

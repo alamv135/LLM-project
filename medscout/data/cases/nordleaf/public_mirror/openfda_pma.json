@@ -1,0 +1,16 @@
+{
+  "synthetic": true,
+  "_note": "SYNTHETIC records in openFDA device/pma format. No PMA exists for the fictional Nordleaf Cardio.",
+  "records": [
+    {
+      "pma_number": "P210045",
+      "supplement_number": "",
+      "applicant": "Halvard Neuro Inc.",
+      "trade_name": "Halvard Implantable Stimulator",
+      "generic_name": "Implanted stimulator (synthetic)",
+      "decision_date": "2021-12-02",
+      "decision_code": "APPR",
+      "product_code": "ZXC"
+    }
+  ]
+}

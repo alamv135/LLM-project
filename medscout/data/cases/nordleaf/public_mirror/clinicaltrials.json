@@ -1,0 +1,32 @@
+{
+  "synthetic": true,
+  "_note": "SYNTHETIC studies in ClinicalTrials.gov API v2 format. NCT ids are invented.",
+  "records": [
+    {
+      "protocolSection": {
+        "identificationModule": {"nctId": "NCT09912345", "briefTitle": "PulseWeave Patch for Atrial Fibrillation Detection (PULSE-AF)"},
+        "statusModule": {"overallStatus": "RECRUITING", "startDateStruct": {"date": "2025-03"},
+                         "primaryCompletionDateStruct": {"date": "2027-06", "type": "ESTIMATED"},
+                         "lastUpdatePostDateStruct": {"date": "2026-08-12"}},
+        "sponsorCollaboratorsModule": {"leadSponsor": {"name": "Nordleaf Cardio Technologies, Inc."}},
+        "designModule": {"studyType": "INTERVENTIONAL", "phases": ["NA"], "enrollmentInfo": {"count": 600, "type": "ESTIMATED"}},
+        "armsInterventionsModule": {"interventions": [{"type": "DEVICE", "name": "PulseWeave ECG patch"}]},
+        "conditionsModule": {"conditions": ["Atrial Fibrillation"]}
+      },
+      "hasResults": false
+    },
+    {
+      "protocolSection": {
+        "identificationModule": {"nctId": "NCT09900001", "briefTitle": "Corvane Strip Monitoring After Ablation"},
+        "statusModule": {"overallStatus": "COMPLETED", "startDateStruct": {"date": "2022-01"},
+                         "primaryCompletionDateStruct": {"date": "2023-05", "type": "ACTUAL"},
+                         "lastUpdatePostDateStruct": {"date": "2024-01-10"}},
+        "sponsorCollaboratorsModule": {"leadSponsor": {"name": "Corvane Diagnostics LLC"}},
+        "designModule": {"studyType": "OBSERVATIONAL", "phases": [], "enrollmentInfo": {"count": 210, "type": "ACTUAL"}},
+        "armsInterventionsModule": {"interventions": [{"type": "DEVICE", "name": "Corvane Strip"}]},
+        "conditionsModule": {"conditions": ["Atrial Fibrillation"]}
+      },
+      "hasResults": true
+    }
+  ]
+}

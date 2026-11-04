@@ -1,0 +1,59 @@
+{
+  "_doc": "Evaluation scenarios. Each expected item matches a finding whose claim text contains ALL 'match' strings (case-insensitive). 'verdicts' lists acceptable verdicts; 'identifiers' must appear among the cited evidence; 'conflict' says whether a conflict should be flagged. Reference outcomes were set by hand from the (synthetic) case data.",
+  "scenarios": [
+    {
+      "id": "ordinary_nordleaf",
+      "kind": "ordinary task",
+      "case": "nordleaf",
+      "expected": [
+        {"match": ["FDA approved"], "verdicts": ["partially_supported"], "identifiers": ["K251234"], "conflict": true},
+        {"match": ["PulseWeave Pro", "planned"], "verdicts": ["company_reported_only", "unresolved"], "conflict": false},
+        {"match": ["completed enrollment"], "verdicts": ["possibly_contradicted"], "identifiers": ["NCT09912345"], "conflict": true},
+        {"match": ["98% sensitivity"], "verdicts": ["company_reported_only", "unresolved"], "conflict": true},
+        {"match": ["peer-reviewed"], "verdicts": ["publicly_supported", "partially_supported"], "identifiers": ["99000001"], "conflict": false},
+        {"match": ["competitors"], "verdicts": ["partially_supported"], "identifiers": ["K233456"], "conflict": false},
+        {"match": ["Medicare"], "verdicts": ["company_reported_only", "unresolved"], "conflict": false},
+        {"match": ["hospitals"], "verdicts": ["company_reported_only", "unresolved"], "conflict": false},
+        {"match": ["has cleared PulseWeave"], "verdicts": ["publicly_supported"], "identifiers": ["K251234"], "conflict": false},
+        {"match": ["K251234"], "verdicts": ["publicly_supported"], "identifiers": ["K251234"], "conflict": false},
+        {"match": ["96.1%"], "verdicts": ["company_reported_only", "unresolved"], "conflict": true},
+        {"match": ["enrolling up to 600"], "verdicts": ["publicly_supported"], "identifiers": ["NCT09912345"], "conflict": false}
+      ]
+    },
+    {
+      "id": "changed_request_regulatory_focus",
+      "kind": "changed request (regulatory claims only)",
+      "case": "nordleaf",
+      "focus": ["regulatory"],
+      "expected": [
+        {"match": ["FDA approved"], "verdicts": ["partially_supported"], "identifiers": ["K251234"], "conflict": true},
+        {"match": ["PulseWeave Pro", "planned"], "verdicts": ["company_reported_only", "unresolved"], "conflict": false},
+        {"match": ["has cleared PulseWeave"], "verdicts": ["publicly_supported"], "identifiers": ["K251234"], "conflict": false},
+        {"match": ["K251234"], "verdicts": ["publicly_supported"], "identifiers": ["K251234"], "conflict": false}
+      ]
+    },
+    {
+      "id": "failure_quillon_tool_faults",
+      "kind": "failure case: no public records + injected tool faults (510(k) timeout once, registry unavailable)",
+      "case": "quillon",
+      "faults": "fda_510k_search=timeout*1,clinicaltrials_search=unavailable*20",
+      "expected": [
+        {"match": ["FDA clearance"], "verdicts": ["company_reported_only", "unresolved"], "conflict": false},
+        {"match": ["300-patient"], "verdicts": ["unresolved", "company_reported_only"], "conflict": false},
+        {"match": ["insurers"], "verdicts": ["company_reported_only", "unresolved"], "conflict": false}
+      ]
+    },
+    {
+      "id": "robustness_nordleaf_malformed_output",
+      "kind": "reliability: malformed model output, ungrounded citation, transient PubMed timeout",
+      "case": "nordleaf",
+      "faults": "pubmed_search=timeout*1",
+      "mock_faults": "malformed:1,ungrounded:1",
+      "expected": [
+        {"match": ["FDA approved"], "verdicts": ["partially_supported"], "identifiers": ["K251234"], "conflict": true},
+        {"match": ["completed enrollment"], "verdicts": ["possibly_contradicted"], "identifiers": ["NCT09912345"], "conflict": true},
+        {"match": ["peer-reviewed"], "verdicts": ["publicly_supported", "partially_supported"], "identifiers": ["99000001"], "conflict": false}
+      ]
+    }
+  ]
+}

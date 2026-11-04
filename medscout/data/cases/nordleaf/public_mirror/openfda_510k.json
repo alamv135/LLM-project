@@ -1,0 +1,47 @@
+{
+  "synthetic": true,
+  "_note": "SYNTHETIC records in openFDA device/510k format for a FICTIONAL demo case. Product code ZXA and all companies are invented.",
+  "records": [
+    {
+      "k_number": "K251234",
+      "applicant": "Nordleaf Cardio Technologies, Inc.",
+      "device_name": "PulseWeave Ambulatory ECG Patch with Arrhythmia Detection Software",
+      "decision_date": "2025-02-20",
+      "date_received": "2024-10-03",
+      "decision_description": "Substantially Equivalent",
+      "clearance_type": "Traditional",
+      "product_code": "ZXA",
+      "openfda": {"device_class": "2", "device_name": "Electrocardiograph, ambulatory, with arrhythmia detection (synthetic)"}
+    },
+    {
+      "k_number": "K233456",
+      "applicant": "Corvane Diagnostics LLC",
+      "device_name": "Corvane Strip Wearable ECG Monitor",
+      "decision_date": "2023-11-08",
+      "decision_description": "Substantially Equivalent",
+      "clearance_type": "Traditional",
+      "product_code": "ZXA",
+      "openfda": {"device_class": "2", "device_name": "Electrocardiograph, ambulatory, with arrhythmia detection (synthetic)"}
+    },
+    {
+      "k_number": "K240789",
+      "applicant": "Ellery Health Inc.",
+      "device_name": "Ellery LoopPatch ECG Recorder",
+      "decision_date": "2024-06-14",
+      "decision_description": "Substantially Equivalent",
+      "clearance_type": "Special",
+      "product_code": "ZXA",
+      "openfda": {"device_class": "2", "device_name": "Electrocardiograph, ambulatory, with arrhythmia detection (synthetic)"}
+    },
+    {
+      "k_number": "K229001",
+      "applicant": "Nordleaf Surgical Ltd.",
+      "device_name": "Nordleaf Cannulated Bone Screw System",
+      "decision_date": "2022-09-30",
+      "decision_description": "Substantially Equivalent",
+      "clearance_type": "Traditional",
+      "product_code": "ZXB",
+      "openfda": {"device_class": "2", "device_name": "Screw, fixation, bone (synthetic)"}
+    }
+  ]
+}

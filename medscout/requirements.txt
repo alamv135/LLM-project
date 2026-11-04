@@ -1,0 +1,7 @@
+# Core (required)
+jsonschema>=4.20          # tool / decision contract validation (tested 4.26.0)
+# Optional
+pypdf>=4.0                # .pdf company materials (tested 6.17.0)
+fastmcp>=2.10             # --transport mcp: public-source tools served over MCP (tested 4.1.6)
+# Model access uses the Python standard library (urllib): Ollama, any OpenAI-compatible
+# endpoint, or Azure-style deployments. No SDK needed.

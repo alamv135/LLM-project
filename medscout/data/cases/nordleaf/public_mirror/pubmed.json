@@ -1,0 +1,28 @@
+{
+  "synthetic": true,
+  "_note": "SYNTHETIC esummary-format records. PMIDs, DOIs, journal and authors are invented.",
+  "records": [
+    {
+      "uid": "99000001",
+      "title": "Diagnostic accuracy of a wearable single-lead patch ECG algorithm for atrial fibrillation: a retrospective validation.",
+      "fulljournalname": "Journal of Synthetic Cardiology",
+      "source": "J Synth Cardiol",
+      "pubdate": "2025 Sep",
+      "authors": [{"name": "Lindqvist A"}, {"name": "Okafor B"}, {"name": "Chen R"}],
+      "articleids": [{"idtype": "pubmed", "value": "99000001"}, {"idtype": "doi", "value": "10.0000/synthetic.2025.001"}],
+      "pubtype": ["Journal Article"],
+      "_abstract_keywords": "PulseWeave Nordleaf Cardio patch sensitivity specificity"
+    },
+    {
+      "uid": "99000002",
+      "title": "Extended ambulatory ECG monitoring after catheter ablation: an observational cohort.",
+      "fulljournalname": "Synthetic Heart Rhythm Reports",
+      "source": "Synth Heart Rhythm Rep",
+      "pubdate": "2024 Mar",
+      "authors": [{"name": "Moreau L"}, {"name": "Iyer S"}],
+      "articleids": [{"idtype": "doi", "value": "10.0000/synthetic.2024.017"}],
+      "pubtype": ["Journal Article"],
+      "_abstract_keywords": "Corvane Strip ablation monitoring"
+    }
+  ]
+}
