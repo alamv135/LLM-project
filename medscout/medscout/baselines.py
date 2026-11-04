@@ -45,8 +45,9 @@ def run_baseline(settings, kind: str, company: str, product: str, materials: Pat
     retrieved: list[dict[str, Any]] = []
     if kind == "rag":
         mirror = case_dir / "public_mirror" if case_dir and (case_dir / "public_mirror").exists() else None
+        mem = Memory(settings.db_path)
         ctx = ToolContext(settings.backend, mirror, chunks=st.chunks, evidence=st.evidence,
-                          skills=SkillLibrary(settings.skills_dir), cache=Memory(settings.db_path),
+                          skills=SkillLibrary(settings.skills_dir), cache=mem,
                           timeout_s=settings.limits.tool_timeout_s)
         gw = ToolGateway(build_specs(), ctx, st, settings.limits, tracer)
         fixed = [{"tool": "fda_510k_search", "arguments": {"applicant": company}},
@@ -58,6 +59,7 @@ def run_baseline(settings, kind: str, company: str, product: str, materials: Pat
                 if o.ok:
                     retrieved += o.for_model(settings.limits.max_records_per_observation).get("records", [])
         gw.close()
+        mem.close()
     budget_chars = (settings.limits.context_window - settings.limits.reserved_output) * 4 - 6000
     payload, used = [], 0
     for c in chunks:                       # truncate to the context budget (no batching in baselines)

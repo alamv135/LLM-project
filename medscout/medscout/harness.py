@@ -32,12 +32,21 @@ INSTRUCTION = ("Decide the next action for this task. Return exactly one JSON ob
 
 class ResearchHarness:
     def __init__(self, *, llm, gateway, ctx: ContextBuilder, skills, state: RunState, memory, tracer,
-                 settings, ask_fn: AskFn | None, run_deadline: float):
+                 settings, ask_fn: AskFn | None, run_deadline: float, ctrl=None):
         self.llm, self.gw, self.ctx, self.skills = llm, gateway, ctx, skills
         self.state, self.memory, self.tracer, self.settings = state, memory, tracer, settings
         self.L = settings.limits
         self.ask_fn = ask_fn
         self.run_deadline = run_deadline
+        self.ctrl = ctrl            # optional RunController (web UI); None for CLI runs
+
+    def _now(self) -> float:
+        return self.ctrl.now() if self.ctrl else time.monotonic()
+
+    def _human_available(self) -> bool:
+        if self.ctrl:
+            return self.ctrl.flags["ask_reviewer"] and self.ask_fn is not None
+        return bool(self.ask_fn and self.settings.interactive)
 
     # ------------------------------------------------------------------ brief
     def _task_brief(self, task: ResearchTask, company_ev: dict[str, str]) -> str:
@@ -69,7 +78,7 @@ class ResearchHarness:
         ws = {"task_step": step + 1, "max_steps": self.L.max_steps_per_task, "tool_calls_used": used,
               "tool_calls_remaining": max(0, self.L.max_tool_calls_per_task - used),
               "max_calls_per_decision": self.L.max_calls_per_batch,
-              "seconds_left": max(0, round(t_end - time.monotonic())), "already_asked_user": asked}
+              "seconds_left": max(0, round(t_end - self._now())), "already_asked_user": asked}
         extra = " This is the LAST step: you must return action 'finish' now." if last else ""
         return f"WORKING_STATE: {json.dumps(ws)}\nINSTRUCTION: {INSTRUCTION}{extra}"
 
@@ -82,12 +91,21 @@ class ResearchHarness:
         observed: set[str] = set(company_ev.values())
         brief = self._task_brief(task, company_ev)
         history: list[dict[str, Any]] = []
-        t_end = min(time.monotonic() + L.task_deadline_s, self.run_deadline)
+        t_end = min(self._now() + L.task_deadline_s, self.run_deadline)
         used = repairs = revisions = asks = 0
         allowed = set(self.gw.specs)
 
         for step in range(L.max_steps_per_task):
-            if time.monotonic() > t_end:
+            if self.ctrl:
+                if self.ctrl.should_skip(task.task_id):
+                    return self._handoff(task, "skipped by reviewer", company_ev)
+                self.ctrl.gate("decision", task_id=task.task_id, step=step + 1, tool_calls_used=used)
+                if self.ctrl.should_skip(task.task_id):
+                    return self._handoff(task, "skipped by reviewer", company_ev)
+                for note in self.ctrl.take_notes(task.task_id):   # reviewer guidance enters the context
+                    history.append({"role": "user", "content": f"REVIEWER_NOTE: {note}"})
+                    self.tracer.event("control", event="note_delivered", task_id=task.task_id, text=note[:200])
+            if self._now() > t_end:
                 return self._handoff(task, "time budget exhausted", company_ev)
             last = step == L.max_steps_per_task - 1
             msgs, info = self.ctx.build(brief, history, self._tail(step, used, t_end, asks > 0, last))
@@ -119,6 +137,13 @@ class ResearchHarness:
                                                                "finish with the evidence you have."})
                     continue
                 calls = d["calls"][:remaining]
+                if self.ctrl and self.ctrl.flags["approve_tools"]:
+                    calls, note = self._approve(task, step, calls, d.get("thought", ""), allowed)
+                    if not calls:
+                        history.append({"role": "user", "content": "REVIEWER_REJECTED_TOOL_CALLS: "
+                                        + (note or "the reviewer did not approve these calls")
+                                        + ". Choose a different action."})
+                        continue
                 obs = self.gw.run_batch(calls, task_id=task.task_id, step=step)
                 used += len(calls)
                 for o in obs:
@@ -142,11 +167,29 @@ class ResearchHarness:
         return self._handoff(task, "step budget exhausted", company_ev)
 
     # ------------------------------------------------------------------ human in the loop
+    def _approve(self, task, step, calls, thought, allowed):
+        """Reviewer approves, edits or rejects a proposed tool batch before it runs."""
+        resp = self.ctrl.request("approve_tools", {"task_id": task.task_id, "step": step + 1,
+                                                   "thought": thought, "calls": calls}) or {}
+        if resp.get("decision") != "approve":
+            self.tracer.event("control", event="tools_rejected", task_id=task.task_id, note=resp.get("note", ""))
+            return [], resp.get("note", "")
+        edited = []
+        for c in resp.get("calls") or calls:
+            if isinstance(c, dict) and c.get("tool") in allowed and isinstance(c.get("arguments"), dict):
+                edited.append({"tool": c["tool"], "arguments": c["arguments"]})
+        edited = edited[: self.L.max_calls_per_batch]
+        if edited != calls:
+            self.tracer.event("control", event="tools_edited", task_id=task.task_id, calls=edited)
+        return edited, ""
+
     def _ask(self, task: ResearchTask, d: dict[str, Any], asks: int) -> str:
         q = d["question"]
         if asks > 1:
             return "ASK_LIMIT: only one question per task; proceed and record the doubt as an open question."
-        answer = self.ask_fn(q, d.get("options", [])) if (self.ask_fn and self.settings.interactive) else None
+        answer = self.ask_fn(q, d.get("options", [])) if self._human_available() else None
+        if isinstance(answer, str) and not answer.strip():
+            answer = None
         rec = {"task_id": task.task_id, "question": q, "answer": answer, "alias_candidate": d.get("alias_candidate")}
         self.tracer.event("ask_user", **rec)
         self.state.human_answers.append(rec)

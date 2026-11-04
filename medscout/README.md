@@ -23,13 +23,36 @@ pip install -r requirements.txt
 ```
 
 ```bash
-python run.py demo                      # fictional Nordleaf Cardio case, offline, mock model
-python run.py test                      # 35 unit/integration tests, no model or network needed
+python run.py ui --open                 # web interface + run controller at http://127.0.0.1:8765
+python run.py demo                      # same agent from the terminal: fictional Nordleaf Cardio case, offline
+python run.py test                      # 44 unit/integration tests, no model or network needed
 python run.py eval                      # 4 scenarios x {medscout, direct, rag} -> eval/results/
 ```
 
 Each run writes `runs/<run_id>/brief.md` (the deliverable), `trace.jsonl` (every model call,
 tool call, decision, verification), `record.json` (full research record) and `summary.json`.
+
+## Web interface and run controller
+
+`python run.py ui` starts a local server (standard library only, bound to 127.0.0.1) and serves a
+browser console. Use `--port` to change the port and `--open` to open the browser.
+
+| Tab | What you can do |
+|---|---|
+| **New run** | Pick a demo case or upload your own `.md/.txt/.pdf` documents; set provider, model, temperature, token prices, offline mirror vs live APIs, local vs MCP tools; limit the scope to themes or categories; edit every budget (steps, tool calls, parallel calls, timeouts, retries, context window...); inject tool or model faults; choose how much control you want. |
+| **Control** | Watch the run live (phase, tasks, activity feed, tokens, cost) and steer it: **pause / resume / stop**, **step** through each model decision, **approve, edit or reject** each tool batch, **review claims** and **review the plan** (reorder, drop, change skill, priority or question), **answer the agent's questions**, send **notes** to the agent, **skip** a task. Gates can be switched on or off while the run is going. |
+| **Results** | Rendered brief, findings with rationale / evidence / conflicts / open questions, source log, claims; download brief.md, record.json, trace.jsonl. |
+| **History** | Every saved run; open it or **resume** a stopped or interrupted run from its checkpoint. |
+| **Tools** | Run any tool through the real gateway (validation, timeout, retries, fault injection) without a model. |
+| **Prompts & skills** | Edit `prompts/*.md`, every `SKILL.md` and reference, and `eval/cases.json`; changes apply to the next run. |
+| **Evaluation** | Run the scenarios against MedScout and the baselines and compare the metrics; load past results. |
+| **Model connection** | Set OpenAI-compatible / Azure / Ollama endpoints and keys (kept in server memory only, never written to disk) and test the connection. |
+
+How the controller works (`medscout/control.py`): the runtime calls `gate()` before every phase,
+task and model decision, and `request()` when it needs a human (claim review, plan review, tool approval,
+a question, a step). The run thread blocks until you answer in the browser. Time spent waiting for you
+is excluded from the run and task deadlines. A stop checkpoints the run so it can be resumed later.
+Only one run (or evaluation) executes at a time.
 
 ### Other commands
 
@@ -103,8 +126,9 @@ Optional: `OPENFDA_API_KEY`, `NCBI_EMAIL`, `NCBI_API_KEY`. Responses are cached 
 | Context budget and compression (structured extraction, recoverable originals) (L4, L5) | `Observation.for_model`, `ContextBuilder.build`, `get_evidence` tool |
 | Skills: SKILL.md, discover → activate → references (L4) | `skills/*/SKILL.md`, `medscout/skills.py`, `read_skill_reference` tool |
 | Memory: working state vs semantic / episodic, controlled writes (L4) | `medscout/state.py` (working), `medscout/memory.py` (aliases written only after human confirmation) |
-| Checkpoints and resume (L4) | `Workflow.checkpoint`, `workflow.resume`, `python run.py resume` |
-| Human in the loop (L4 "ask permission", proposal C4) | `ask_user` action → `--interactive`; non-interactive runs record the doubt as an open question |
+| Checkpoints and resume (L4) | `Workflow.checkpoint`, `workflow.resume`, `python run.py resume`, Resume button in the UI |
+| Human in the loop (L4 "ask permission", proposal C4) | `ask_user` action → UI or `--interactive`; non-interactive runs record the doubt as an open question |
+| Runtime control points: before inference, after model output, before continuing (L4 harness) | `medscout/control.py` gates in `harness.py` / `workflow.py`: pause, stop, step, tool approval, plan and claim review, notes, skip |
 | Tracing: inputs, outputs, time, cost (L4) | `medscout/trace.py` → `runs/<id>/trace.jsonl` |
 | Latency / cost accounting, p50/p95 (L4) | `llm.call_model`, `Tracer.summary`, brief run log |
 | Testing strategy: parser checks, fault injection, end-to-end, regression (L4) | `tests/`, `eval/` |
@@ -138,6 +162,8 @@ Optional: `OPENFDA_API_KEY`, `NCBI_EMAIL`, `NCBI_API_KEY`. Responses are cached 
 | Ambiguous entity (applicant name ≠ company) | model asks | one question per task; alias stored only if confirmed | `test_human_confirmed_alias_becomes_memory` |
 | Step / tool / time budget reached | harness counters | handoff: `unresolved`, reason recorded | `test_step_budget_handoff` |
 | Process crash / Ctrl-C | checkpoint after every node and task | `python run.py resume <id>` | `test_resume_from_checkpoint` |
+| Reviewer stops the run | `StopRequested` at the next gate | checkpoint; Resume continues the unfinished task | `test_stop_then_resume`, `test_2_stop_and_resume_over_http` |
+| Reviewer takes a long time to answer | waiting time is tracked | excluded from run and task deadlines | `test_pause_time_is_excluded_from_deadlines` |
 
 ## Evaluation
 
@@ -157,6 +183,9 @@ round + one synthesis call), same model and settings.
 run.py                     CLI entry point
 medscout/
   workflow.py              outer graph: intake → extract → plan → research → reconcile → brief (+ checkpoints)
+  control.py               run controller: gates, reviewer requests, notes, skip, pause/stop
+  web/server.py            local web server + JSON API (python run.py ui)
+  web/static/              browser console (index.html, app.js, app.css; no build step)
   harness.py               bounded ReAct loop for one research task
   context.py               context builder, budget, compression
   protocol.py              JSON output contracts + parser
@@ -171,7 +200,7 @@ skills/                    claim-extraction, regulatory-check (+ references/), c
                            competitive-context, commercial-signals
 data/cases/                nordleaf (ordinary), quillon (failure) — FICTIONAL, synthetic mirrors
 eval/cases.json            scenarios + reference outcomes
-tests/                     unittest suite (python run.py test)
+tests/                     unittest suite (python run.py test), incl. controller and web API tests
 ```
 
 ## Mocks, unverified parts and limitations

@@ -71,7 +71,7 @@ class Observation:
 
 class ToolGateway:
     def __init__(self, specs: dict[str, ToolSpec], ctx: ToolContext, state: RunState, limits, tracer,
-                 transport: str = "local", mcp_server_args: list[str] | None = None):
+                 transport: str = "local", mcp_server_args: list[str] | None = None, faults: str | None = None):
         self.specs = specs
         self.ctx = ctx
         self.state = state
@@ -79,12 +79,13 @@ class ToolGateway:
         self.tracer = tracer
         self.transport = transport
         self.mcp_server_args = mcp_server_args or []
-        self.faults = parse_faults(os.environ.get("MEDSCOUT_FAULTS", ""))
+        self.faults = parse_faults(os.environ.get("MEDSCOUT_FAULTS", "") if faults is None else faults)
         self.mcp_tools: set[str] = set()
         self._client = None
         # One background event loop for all tool I/O, so an MCP session can stay open across calls.
         self._loop = asyncio.new_event_loop()
-        threading.Thread(target=self._loop.run_forever, daemon=True, name="medscout-tools").start()
+        self._thread = threading.Thread(target=self._loop.run_forever, daemon=True, name="medscout-tools")
+        self._thread.start()
         if transport == "mcp":
             self.mcp_tools = self._discover_mcp()
 
@@ -98,7 +99,12 @@ class ToolGateway:
             except Exception:  # pragma: no cover
                 pass
             self._client = None
+        if self._loop.is_closed():
+            return
         self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=5)
+        if not self._loop.is_running():
+            self._loop.close()
 
     # ------------------------------------------------------------- validation
     def validate(self, call: dict[str, Any]) -> None:

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MedScout Console</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap">
+    <div class="brand"><b>MedScout</b><span>diligence agent console</span></div>
+    <nav class="tabs" aria-label="Sections">
+      <a href="#new">New run</a>
+      <a href="#control">Control</a>
+      <a href="#results">Results</a>
+      <a href="#history">History</a>
+      <a href="#tools">Tools</a>
+      <a href="#files">Prompts &amp; skills</a>
+      <a href="#eval">Evaluation</a>
+      <a href="#connection">Model connection</a>
+    </nav>
+    <div class="runchip" id="runchip"></div>
+  </div>
+</header>
+<main class="wrap" id="main">
+  <section class="view" id="view-new" hidden></section>
+  <section class="view" id="view-control" hidden></section>
+  <section class="view" id="view-results" hidden></section>
+  <section class="view" id="view-history" hidden></section>
+  <section class="view" id="view-tools" hidden></section>
+  <section class="view" id="view-files" hidden></section>
+  <section class="view" id="view-eval" hidden></section>
+  <section class="view" id="view-connection" hidden></section>
+</main>
+<div id="toasts" aria-live="polite"></div>
+<script src="/app.js"></script>
+</body>
+</html>

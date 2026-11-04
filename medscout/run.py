@@ -10,6 +10,7 @@
   python run.py probe --case nordleaf --claim C1        # one model decision, no tool execution
   python run.py eval                                   # scenarios x systems -> eval/results/
   python run.py test                                   # unit + integration tests (no model needed)
+  python run.py ui                                     # web interface + run controller at http://127.0.0.1:8765
 """
 
 from __future__ import annotations
@@ -147,6 +148,11 @@ def cmd_eval(a) -> None:
              scenarios=[x.strip() for x in a.scenarios.split(",")] if a.scenarios else None)
 
 
+def cmd_ui(a) -> None:
+    from medscout.web.server import serve
+    serve(host=a.host, port=a.port, settings=_settings(a), open_browser=a.open)
+
+
 def cmd_test(_a) -> None:
     suite = unittest.defaultTestLoader.discover(str(ROOT / "tests"), top_level_dir=str(ROOT))
     res = unittest.TextTestRunner(verbosity=2).run(suite)
@@ -186,10 +192,14 @@ def main() -> None:
     p = sub.add_parser("eval", parents=[common])
     p.add_argument("--systems", default="medscout,direct,rag")
     p.add_argument("--scenarios", help="comma list; default: all in eval/cases.json")
+    p = sub.add_parser("ui", parents=[common], help="local web interface with the run controller")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--open", action="store_true", help="open the browser")
     sub.add_parser("test")
     a = ap.parse_args()
     {"run": cmd_run, "demo": lambda x: cmd_run(x, demo=True), "resume": cmd_resume, "tool-check": cmd_tool_check,
-     "probe": cmd_probe, "eval": cmd_eval, "test": cmd_test}[a.cmd](a)
+     "probe": cmd_probe, "eval": cmd_eval, "ui": cmd_ui, "test": cmd_test}[a.cmd](a)
 
 
 if __name__ == "__main__":

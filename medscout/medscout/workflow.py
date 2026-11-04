@@ -33,7 +33,7 @@ from .llm import LLMError, call_model, make_llm, messages_tokens
 from .memory import Memory
 from .protocol import EXTRACT_SCHEMA, PLAN_SCHEMA, ProtocolError, parse
 from .skills import SkillLibrary
-from .state import CATEGORIES, THEMES, VERDICTS, Claim, Finding, ResearchTask, RunState
+from .state import CATEGORIES, THEMES, VERDICTS, Claim, Finding, ResearchTask, RunState  # noqa: F401
 from .tools import ToolContext, ToolGateway, build_specs, catalog_text
 from .tools.mirror import words
 
@@ -52,8 +52,10 @@ def render(template: str, **values: str) -> str:
 
 class Workflow:
     def __init__(self, settings, state: RunState, *, case_dir: Path | None = None,
-                 ask_fn: Callable[[str, list[str]], str | None] | None = None, echo: bool = True):
+                 ask_fn: Callable[[str, list[str]], str | None] | None = None, echo: bool = True,
+                 ctrl=None, faults: str | None = None):
         self.settings, self.state = settings, state
+        self.ctrl = ctrl          # optional RunController (web UI)
         self.L = settings.limits
         self.run_dir = settings.runs_dir / state.run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -72,34 +74,46 @@ class Workflow:
                                     cache=self.memory, timeout_s=self.L.tool_timeout_s)
         mcp_args = ["--backend", settings.backend] + (["--mirror", mirror] if mirror else [])
         self.gateway = ToolGateway(self.specs, self.tool_ctx, state, self.L, self.tracer,
-                                   transport=settings.tool_transport, mcp_server_args=mcp_args)
+                                   transport=settings.tool_transport, mcp_server_args=mcp_args, faults=faults)
         self.llm = make_llm(settings)
         system = render((settings.prompts_dir / "system.md").read_text(),
                         TOOL_CATALOG=catalog_text(self.specs), SKILL_INDEX=self.skills.index_text(),
                         VERDICTS=", ".join(VERDICTS))
         self.ctx = ContextBuilder(system, self.L)
         self.ask_fn = ask_fn
-        self.deadline = time.monotonic() + self.L.run_deadline_s
+        self.deadline = self._now() + self.L.run_deadline_s
+
+    def _now(self) -> float:
+        return self.ctrl.now() if self.ctrl else time.monotonic()
 
     # ------------------------------------------------------------------ edges
     def run(self) -> RunState:
+        from .control import StopRequested
         st = self.state
+        st.stop_reason = ""
         self.tracer.event("phase", phase=st.phase, run_id=st.run_id, provider=self.settings.provider,
                           backend=self.settings.backend, transport=self.settings.tool_transport)
         try:
             while st.phase != "done":
+                if self.ctrl:
+                    self.ctrl.gate("node", phase=st.phase)
                 node = getattr(self, st.phase)
                 node()
                 st.phase = NEXT[st.phase]
                 self.checkpoint()
                 if st.phase != "done":
                     self.tracer.event("phase", phase=st.phase)
+        except StopRequested:
+            st.stop_reason = "stopped by reviewer"
+            self.checkpoint()          # resume continues from the unfinished phase / task
+            self.tracer.event("stop", reason=st.stop_reason, phase=st.phase)
         except KeyboardInterrupt:
             self.checkpoint()
             print(f"\n[medscout] interrupted; resume with: python run.py resume {st.run_id}")
             raise
         finally:
             self.gateway.close()
+            self.memory.close()
         return st
 
     def checkpoint(self) -> None:
@@ -170,6 +184,36 @@ class Workflow:
                      for i, c in enumerate(merged, 1)]
         self.tracer.event("phase", phase="extract_claims", claims=len(st.claims),
                           by_category=dict(Counter(c.category for c in st.claims)))
+        if self.ctrl and self.ctrl.flags["review_claims"]:
+            self._review_claims()
+
+    def _review_claims(self) -> None:
+        """Reviewer may drop claims, fix wording or change the category before planning."""
+        st = self.state
+        resp = self.ctrl.request("review_claims", {"claims": [
+            {"claim_id": c.claim_id, "text": c.text, "category": c.category, "materiality": c.materiality,
+             "status_language": c.status_language,
+             "sources": [f"{ch.doc}, {ch.location}" for i in c.source_chunk_ids if (ch := st.chunk(i))]}
+            for c in st.claims], "categories": CATEGORIES}) or {}
+        edits = {e.get("claim_id"): e for e in resp.get("claims", []) if isinstance(e, dict)}
+        kept, dropped = [], []
+        for c in st.claims:
+            e = edits.get(c.claim_id)
+            if e is None:
+                kept.append(c)
+                continue
+            if not e.get("keep", True):
+                dropped.append(c.claim_id)
+                continue
+            if isinstance(e.get("text"), str) and len(e["text"].strip()) >= 8:
+                c.text = e["text"].strip()
+            if e.get("category") in CATEGORIES:
+                c.category = e["category"]
+            if e.get("materiality") in ("high", "medium", "low"):
+                c.materiality = e["materiality"]
+            kept.append(c)
+        st.claims = kept
+        self.tracer.event("control", event="claims_reviewed", kept=len(kept), dropped=dropped)
 
     def _chunk_batches(self, template: str, skill: str):
         """Fit chunks into the input budget (Lec 4 'Context budget'): one or more calls per document."""
@@ -241,16 +285,57 @@ class Workflow:
                                            open_questions=[t.question], task_id=t.task_id, verified=True)
         self.tracer.event("plan", tasks=[{"task_id": t.task_id, "claims": t.claim_ids, "skill": t.skill,
                                           "priority": t.priority} for t in st.tasks])
+        if self.ctrl and self.ctrl.flags["review_plan"]:
+            self._review_plan()
+
+    def _review_plan(self) -> None:
+        """Reviewer may reorder, drop or edit tasks (question, skill, priority) before research starts."""
+        st = self.state
+        skills = [n for n in self.skills.names() if n != "claim-extraction"]
+        resp = self.ctrl.request("review_plan", {
+            "tasks": [{"task_id": t.task_id, "claim_ids": t.claim_ids, "question": t.question, "skill": t.skill,
+                       "priority": t.priority,
+                       "claims": [{"claim_id": c, "text": st.claim(c).text, "category": st.claim(c).category}
+                                  for c in t.claim_ids if st.claim(c)]} for t in st.tasks],
+            "skills": skills}) or {}
+        by_id = {t.task_id: t for t in st.tasks}
+        new: list[ResearchTask] = []
+        removed: list[str] = []
+        for e in resp.get("tasks", [t.__dict__ for t in st.tasks]):
+            t = by_id.pop(e.get("task_id"), None) if isinstance(e, dict) else None
+            if t is None:
+                continue
+            if not e.get("keep", True):
+                removed.append(t.task_id)
+                for cid in t.claim_ids:
+                    st.findings[cid] = Finding(cid, "unresolved", [], "Not researched: removed from the plan by "
+                                               "the reviewer.", task_id="removed", verified=True)
+                continue
+            if isinstance(e.get("question"), str) and len(e["question"].strip()) >= 8:
+                t.question = e["question"].strip()
+            if e.get("skill") in skills:
+                t.skill = e["skill"]
+            if e.get("priority") in (1, 2, 3, "1", "2", "3"):
+                t.priority = int(e["priority"])
+            new.append(t)
+        new += list(by_id.values())          # tasks the response did not mention keep their place at the end
+        for i, t in enumerate(new, 1):
+            t.task_id = f"T{i}"
+        st.tasks = new
+        self.tracer.event("control", event="plan_reviewed", removed=removed,
+                          tasks=[{"task_id": t.task_id, "claims": t.claim_ids, "skill": t.skill} for t in new])
 
     def research(self) -> None:
         st = self.state
         h = ResearchHarness(llm=self.llm, gateway=self.gateway, ctx=self.ctx, skills=self.skills, state=st,
                             memory=self.memory, tracer=self.tracer, settings=self.settings, ask_fn=self.ask_fn,
-                            run_deadline=self.deadline)
+                            run_deadline=self.deadline, ctrl=self.ctrl)
         for task in st.tasks:
             if task.status != "pending":
                 continue          # resume: skip finished tasks
-            if time.monotonic() > self.deadline:
+            if self.ctrl:
+                self.ctrl.gate("task", task_id=task.task_id)
+            if self._now() > self.deadline:
                 task.status, task.stop_reason = "unresolved", "run time budget exhausted"
                 for cid in task.claim_ids:
                     st.findings[cid] = Finding(cid, "unresolved", [], "Not researched: run time budget exhausted.",
@@ -307,19 +392,28 @@ class Workflow:
         self.tracer.event("phase", phase="brief", path=str(self.run_dir / "brief.md"))
 
 
-def resume(settings, run_id: str, ask_fn=None, echo=True) -> RunState:
+def load_for_resume(settings, run_id: str) -> RunState:
+    """Load a checkpoint and restore the configuration the run started with (provider, backend, limits)."""
     mem = Memory(settings.db_path)
     ck = mem.load_checkpoint(run_id)
+    mem.close()
     if ck is None:
         raise SystemExit(f"no checkpoint for run {run_id}")
     st = RunState.from_json(ck[1])
-    if st.phase == "done":
-        print(f"[medscout] run {run_id} already finished")
-        return st
-    # restore the configuration the run started with
     settings.provider = st.config.get("provider", settings.provider)
     settings.model = st.config.get("model", settings.model)
     settings.backend = st.config.get("backend", settings.backend)
     settings.tool_transport = st.config.get("tool_transport", settings.tool_transport)
+    for k, v in (st.config.get("limits") or {}).items():
+        if hasattr(settings.limits, k):
+            setattr(settings.limits, k, v)
+    return st
+
+
+def resume(settings, run_id: str, ask_fn=None, echo=True) -> RunState:
+    st = load_for_resume(settings, run_id)
+    if st.phase == "done":
+        print(f"[medscout] run {run_id} already finished")
+        return st
     wf = Workflow(settings, st, ask_fn=ask_fn, echo=echo)
     return wf.run()

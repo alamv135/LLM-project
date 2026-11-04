@@ -44,6 +44,10 @@ class Memory:
         self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self.conn.executescript(SCHEMA)
 
+    def close(self) -> None:
+        with self._lock:
+            self.conn.close()
+
     def _exec(self, sql: str, args: tuple = ()) -> list[tuple]:
         with self._lock:
             cur = self.conn.execute(sql, args)

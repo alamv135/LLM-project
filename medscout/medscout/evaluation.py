@@ -93,7 +93,7 @@ def _medscout(settings, sc: dict[str, Any], company: str, product: str, cdir: Pa
                             if st.findings.get(c.claim_id) and st.findings[c.claim_id].task_id != "out_of_scope")}
 
 
-def run_eval(settings, systems: list[str], scenarios: list[str] | None = None) -> dict[str, Any]:
+def run_eval(settings, systems: list[str], scenarios: list[str] | None = None, on_row=None) -> dict[str, Any]:
     cases = json.loads((ROOT / "eval" / "cases.json").read_text())["scenarios"]
     if scenarios:
         cases = [c for c in cases if c["id"] in scenarios]
@@ -126,6 +126,8 @@ def run_eval(settings, systems: list[str], scenarios: list[str] | None = None) -
                          "tokens_in": c["tokens_in"], "tokens_out": c["tokens_out"], "cost_usd": c["cost_usd"],
                          "wall_time_s": r["summary"].get("wall_time_s"), "run_id": r.get("run_id", ""),
                          "scope_ok": r.get("scope_ok")})
+            if on_row:
+                on_row(rows[-1])
             print(f"[eval] {sc['id']:<40} {system:<9} recall={m['claim_recall']} acc={m['verdict_accuracy']} "
                   f"false_res={m['false_resolution']} ev={m['evidence_support']} conflicts={m['conflict_recall']}")
     meta = {"timestamp": stamp, "provider": settings.provider, "model": settings.default_model(),
