@@ -126,7 +126,7 @@
     auto.value = "auto";
     sel.appendChild(auto);
     const catalog = s.catalog || [];
-    [["Local (free, private)", catalog.filter((m) => m.local)], ["API via OpenRouter (paid)", catalog.filter((m) => !m.local)]].forEach(([label, list]) => {
+    [["Local (free, private)", catalog.filter((m) => m.local)], ["API (paid)", catalog.filter((m) => !m.local)]].forEach(([label, list]) => {
       if (!list.length) return;
       const g = document.createElement("optgroup");
       g.label = label;
@@ -178,7 +178,7 @@
     } else if (s.key_missing) {
       banner.hidden = false;
       banner.className = "banner";
-      banner.innerHTML = ICON.warn + "<div><b></b> needs an OpenRouter API key. Add it in the console's <b>Model connection</b> tab, or pick a local model or Auto.</div>";
+      banner.innerHTML = ICON.warn + "<div><b></b> needs an API key. Add it in the console's <b>Model connection</b> tab, or pick a local model or Auto.</div>";
       banner.querySelector("div b").textContent = (state.currentModel && state.currentModel.label) || current;
     } else if (!s.model_installed) {
       const pull = s.download_model || current;

@@ -1042,13 +1042,14 @@ async function refreshModels(force) {
   fill(body, h("p", { class: "small muted", text: "Checking Ollama and OpenRouter…" }));
   try {
     const r = await api("GET", "/api/models" + (force ? "?refresh=1" : ""));
-    fill($("#models-info"), r.info.map((x) => h("div", { text: x })), r.openrouter_key_set ? null : h("div", { class: "callout warn small", style: "margin:8px 0" },
-      "No OpenRouter key yet: cloud models are skipped and Auto uses local models only. Add it on ", h("a", { href: "#connection", text: "Model connection" }), "."));
+    const missing = Object.entries(r.keys || {}).filter(([, ok]) => !ok).map(([p]) => p);
+    fill($("#models-info"), r.info.map((x) => h("div", { text: x })), missing.length ? h("div", { class: "callout warn small", style: "margin:8px 0" },
+      `No API key for: ${missing.join(", ")}. Their models are skipped (Auto uses the others, or local models). Add keys on `, h("a", { href: "#connection", text: "Model connection" }), ".") : null);
     fill(body, h("div", { class: "tbl" }, h("table", {},
       h("thead", {}, h("tr", {}, ["Name", "Model", "Kind", "Price in / out", "Context", "Can do", "Status", ""].map((x) => h("th", { text: x })))),
       h("tbody", {}, r.models.map((m) => h("tr", {},
         h("td", {}, h("b", { text: m.alias })), h("td", {}, m.label, h("div", { class: "small muted mono", text: m.id })),
-        h("td", { text: TIER[m.tier] || "tier " + m.tier }), h("td", { class: "small", text: fmtPrice(m) }),
+        h("td", {}, TIER[m.tier] || "tier " + m.tier, m.local ? null : h("div", { class: "small muted", text: "via " + m.provider })), h("td", { class: "small", text: fmtPrice(m) }),
         h("td", { class: "num small", text: fmtNum(m.context) }),
         h("td", { class: "small", text: [m.tools && "tools", m.vision && "images", m.thinking && "thinking", m.json_schema && "JSON schema"].filter(Boolean).join(", ") }),
         h("td", { class: "small" }, m.available ? h("span", { class: "pill done", text: "ready" }) : h("span", { class: "pill error", text: m.why }), m.notes.map((n) => h("div", { class: "muted", text: n }))),
@@ -1101,6 +1102,7 @@ const CONN_FIELDS = [
   ["azure_api_key", "Azure API key", "password", ""],
   ["azure_api_version", "Azure API version", "text", "e.g. 2024-06-01"],
   ["openrouter_api_key", "OpenRouter API key (Claude, DeepSeek, Gemini...)", "password", ""],
+  ["deepseek_api_key", "DeepSeek API key (direct, without OpenRouter)", "password", ""],
   ["ollama_host", "Ollama host", "text", "default http://localhost:11434"],
   ["openfda_api_key", "openFDA API key (optional)", "password", ""],
   ["ncbi_email", "NCBI email (PubMed etiquette)", "text", ""],

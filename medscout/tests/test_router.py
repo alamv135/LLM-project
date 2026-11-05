@@ -50,6 +50,7 @@ class RouterBase(unittest.TestCase):
         cfg = json.loads((ROOT / "config" / "models.json").read_text())
         cfg["providers"]["ollama"] = {"kind": "ollama", "base_url": "http://127.0.0.1:%d" % cls.ollama.server_address[1]}
         cfg["providers"]["openrouter"]["base_url"] = "http://127.0.0.1:%d/api/v1" % cls.orouter.server_address[1]
+        cfg["providers"]["deepseek"]["base_url"] = "http://127.0.0.1:%d/deepseek" % cls.orouter.server_address[1]
         cls.models_path = cls.tmp / "models.json"
         cls.models_path.write_text(json.dumps(cfg))
         cls.db_path = make_db(cls.tmp / "deals.sqlite")
@@ -64,7 +65,8 @@ class RouterBase(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def setUp(self):
-        self._env = {k: os.environ.get(k) for k in ("MEDSCOUT_MODELS", "OPENROUTER_API_KEY", "OLLAMA_HOST")}
+        self._env = {k: os.environ.get(k) for k in ("MEDSCOUT_MODELS", "OPENROUTER_API_KEY", "OLLAMA_HOST", "DEEPSEEK_API_KEY")}
+        os.environ.pop("DEEPSEEK_API_KEY", None)
         os.environ["MEDSCOUT_MODELS"] = str(self.models_path)
         os.environ["OPENROUTER_API_KEY"] = "test-key"
         os.environ.pop("OLLAMA_HOST", None)
@@ -144,6 +146,51 @@ class TestRegistryAndProviders(RouterBase):
                          {"id": "call_abc", "function": {"name": "web_search", "arguments": {"query": "ollama release"}}})
         self.assertEqual(chunks[-1]["cost"], fake_openrouter.COST)
         self.assertTrue(chunks[-1]["done"])
+
+
+class TestDeepSeekDirect(RouterBase):
+    def test_used_when_its_key_is_set(self):
+        self.assertEqual(self.router.for_run("plan", Needs()).model.alias, "deepseek")        # no key: OpenRouter
+        os.environ["DEEPSEEK_API_KEY"] = "ds-key"
+        d = self.router.for_run("plan", Needs())
+        self.assertEqual(d.model.alias, "deepseek-direct")
+        m = d.model
+        res = self.router.provider(m).complete(m.id, [{"role": "user", "content": "PHASE: plan\nCLAIMS_JSON:\n[]\nEND_CLAIMS"}],
+                                               {"type": "object"}, json_schema=m.json_schema)
+        sent = self.cloud_calls()[-1]
+        self.assertEqual((sent["_path"], sent["_auth"]), ("/deepseek/chat/completions", "Bearer ds-key"))
+        self.assertEqual(sent["response_format"], {"type": "json_object"})   # DeepSeek: JSON mode, no schema
+        self.assertNotIn("usage", sent)                                       # OpenRouter-only option
+        self.assertIsNone(res.cost_usd)                                       # DeepSeek reports no cost ...
+        self.assertAlmostEqual(m.cost(res.tokens_in, res.tokens_out), (300 * 0.14 + 40 * 0.28) / 1e6)
+
+    def test_run_and_ask_through_direct_api(self):
+        os.environ["DEEPSEEK_API_KEY"] = "ds-key"
+        s = temp_settings(provider="router", model="auto")
+        st, cdir = new_state(focus=["regulatory"])
+        Workflow(s, st, case_dir=cdir, echo=False).run()
+        self.assertEqual(st.phase, "done")
+        direct = [r for r in self.cloud_calls() if r["_path"].startswith("/deepseek/")]
+        self.assertTrue(direct)
+        self.assertFalse([r for r in self.cloud_calls() if r["_path"].startswith("/api/v1/")])
+        self.assertAlmostEqual(st.counters.cost_usd, len(direct) * (300 * 0.14 + 40 * 0.28) / 1e6, places=5)
+        # streamed chat with the direct API
+        chunks = list(self.router.provider(self.reg.get("deepseek-direct")).stream(
+            {"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "hello"}]}))
+        self.assertIn("deepseek-v4-flash", "".join(c["message"].get("content", "") for c in chunks))
+        self.assertIsNone(chunks[-1]["cost"])
+
+    def test_model_id_check_and_names(self):
+        os.environ["DEEPSEEK_API_KEY"] = "ds-key"
+        self.reg.models["deepseek-direct"].id = "deepseek-chat"                # an old, retired name
+        info = self.reg.check_direct_providers()
+        self.assertIn("deepseek: 2 models offered", info)
+        self.assertIn("not offered by deepseek", self.reg.get("deepseek-direct").notes[0])
+        m = self.reg.get("deepseek:deepseek-v4-pro")
+        self.assertEqual((m.provider, m.id, m.local), ("deepseek", "deepseek-v4-pro", False))
+        self.assertEqual(self.reg.get("anthropic/claude-sonnet-5.5").provider, "openrouter")
+        self.reg.refresh_catalog(force=True)
+        self.assertFalse(self.reg.get("deepseek-direct").notes[1:])            # not matched against OpenRouter
 
 
 class TestRouterDecisions(RouterBase):
@@ -414,7 +461,7 @@ class TestAskThroughRouter(RouterBase):
         status, raw = self.request("GET", "/api/models?refresh=1")
         data = json.loads(raw)
         self.assertEqual(status, 200)
-        self.assertEqual({m["alias"] for m in data["models"]}, {"qwen-local", "gemma-local", "deepseek", "gemini", "claude"})
+        self.assertEqual({m["alias"] for m in data["models"]}, {"qwen-local", "gemma-local", "deepseek-direct", "deepseek", "gemini", "claude"})
         self.assertTrue(data["openrouter_key_set"])
         _, raw = self.request("POST", "/api/models/test", {"model": "deepseek"})
         self.assertTrue(json.loads(raw)["ok"])

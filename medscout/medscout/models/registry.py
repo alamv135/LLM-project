@@ -104,13 +104,20 @@ class Registry:
         for m in self.models.values():            # the provider id also works ("qwen3.5:9b")
             if m.id == name:
                 return m
+        prefix, _, rest = name.partition(":")
+        p = self.providers.get(prefix)
+        if p and rest and p.get("kind") == "openai":            # e.g. "deepseek:deepseek-v4-pro"
+            m = ModelInfo(alias=name, provider=prefix, kind="openai", id=rest, label=rest, tier=1, local=False)
+            if p.get("openrouter"):
+                self._fill_from_catalog(m, self._read_cache().get("models", {}))
+            return m
         if name.startswith("ollama:") or (":" in name and "/" not in name):
             tag = name.split("ollama:", 1)[-1]
             return ModelInfo(alias=tag, provider=self.first_provider("ollama"), kind="ollama", id=tag, label=tag,
                              tier=0, local=True, json_schema=True)
-        if name.startswith("openrouter:") or "/" in name:
-            mid = name.split("openrouter:", 1)[-1]
-            prov = self.first_provider("openai")
+        if "/" in name:
+            mid = name
+            prov = next((n for n, q in self.providers.items() if q.get("openrouter")), self.first_provider("openai"))
             m = ModelInfo(alias=mid, provider=prov, kind="openai", id=mid, label=mid, tier=1, local=False)
             self._fill_from_catalog(m, self._read_cache().get("models", {}))
             return m
@@ -209,11 +216,34 @@ class Registry:
     def _apply(self, cache: dict[str, Any]) -> None:
         found = 0
         for m in self.models.values():
-            if not m.local:
+            if self._is_openrouter(m):
                 found += self._fill_from_catalog(m, cache.get("models", {}))
-        cloud = sum(1 for m in self.models.values() if not m.local)
+        cloud = sum(1 for m in self.models.values() if self._is_openrouter(m))
         age = (time.time() - cache.get("fetched", time.time())) / 3600
         self.catalog_info = f"OpenRouter list: {found} of {cloud} cloud models found (updated {age:.0f} h ago)"
+
+    def _is_openrouter(self, m: ModelInfo) -> bool:
+        return not m.local and bool((self.providers.get(m.provider) or {}).get("openrouter"))
+
+    def check_direct_providers(self, timeout: float = 10.0) -> list[str]:
+        """For direct APIs (e.g. DeepSeek) with a key: does the provider still offer each model id?"""
+        out = []
+        for name, p in self.providers.items():
+            if p.get("kind") != "openai" or p.get("openrouter") or not self.api_key(name):
+                continue
+            try:
+                data = get_json(self.base_url(name) + "/models", {"Authorization": "Bearer " + self.api_key(name)}, timeout)
+            except Exception as exc:  # noqa: BLE001
+                out.append(f"{name}: model list not reachable ({str(exc)[:80]})")
+                continue
+            ids = {d.get("id") for d in data.get("data") or []}
+            for m in self.models.values():
+                if m.provider == name:
+                    m.notes = [n for n in m.notes if not n.startswith("not offered")]
+                    if ids and m.id not in ids:
+                        m.notes.append(f"not offered by {name} - available: {', '.join(sorted(ids))[:120]}")
+            out.append(f"{name}: {len(ids)} models offered")
+        return out
 
     @staticmethod
     def _fill_from_catalog(m: ModelInfo, catalog: dict[str, Any]) -> int:

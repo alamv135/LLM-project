@@ -5,6 +5,7 @@
                                     stream=true  -> scripted chat: "search" -> a web_search tool call
                                     split over several chunks; after a tool result -> an answer citing [1]
 Every answer reports usage with a cost, as OpenRouter does. Requests are kept in FakeOpenRouter.requests.
+Under /deepseek/ it plays DeepSeek's own API instead: models deepseek-v4-flash / -pro, usage WITHOUT a cost.
 """
 from __future__ import annotations
 
@@ -31,6 +32,9 @@ CATALOG = {"data": [
 ]}
 
 
+DEEPSEEK_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
+
+
 class QuietServer(ThreadingHTTPServer):
     """Clients closing kept-alive connections are normal here; do not print them."""
     def handle_error(self, request, client_address):  # noqa: ANN001
@@ -55,6 +59,8 @@ class FakeOpenRouter(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/deepseek/models":
+            return self._json({"object": "list", "data": [{"id": m} for m in sorted(DEEPSEEK_MODELS)]})
         if self.path == "/api/v1/models":
             return self._json(CATALOG)
         return self._json({"error": {"message": "not found"}}, 404)
@@ -62,14 +68,18 @@ class FakeOpenRouter(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
         body["_auth"] = self.headers.get("Authorization")
+        body["_path"] = self.path
         FakeOpenRouter.requests.append(body)
-        if self.path != "/api/v1/chat/completions":
+        direct = self.path == "/deepseek/chat/completions"
+        if self.path != "/api/v1/chat/completions" and not direct:
             return self._json({"error": {"message": "not found"}}, 404)
         if not (body.get("_auth") or "").startswith("Bearer "):
             return self._json({"error": {"message": "No auth credentials found"}}, 401)
-        if body.get("model") not in {m["id"] for m in CATALOG["data"]}:
+        if body.get("model") not in (DEEPSEEK_MODELS if direct else {m["id"] for m in CATALOG["data"]}):
             return self._json({"error": {"message": "model not found"}}, 404)
-        usage = {"prompt_tokens": 300, "completion_tokens": 40, "cost": COST}
+        usage = {"prompt_tokens": 300, "completion_tokens": 40}
+        if not direct:
+            usage["cost"] = COST
         if not body.get("stream"):
             from medscout import mock_policy
             msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else ""}

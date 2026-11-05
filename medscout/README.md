@@ -25,7 +25,7 @@ pip install -r requirements.txt
 ```bash
 python run.py ui --open                 # web interface + run controller at http://127.0.0.1:8765
 python run.py demo                      # same agent from the terminal: fictional Nordleaf Cardio case, offline
-python run.py test                      # 107 unit/integration tests, no model or network needed
+python run.py test                      # 110 unit/integration tests, no model or network needed
 python run.py eval                      # 4 scenarios x {medscout, direct, rag} -> eval/results/
 ```
 
@@ -135,6 +135,7 @@ each Ask answer and stored in each run's `trace.jsonl` as `route`):
 |---|---|---|---|
 | `qwen-local` | qwen3.5:9b (Ollama) | local, free | – |
 | `gemma-local` | gemma4:e4b (Ollama) | local, free | – |
+| `deepseek-direct` | deepseek-v4-flash (DeepSeek's own API) | cheap API | ~$0.14 / $0.28 |
 | `deepseek` | deepseek/deepseek-v4.1-flash (OpenRouter) | cheap API | ~$0.15 / $0.60 |
 | `gemini` | google/gemini-3.8-flash (OpenRouter) | cheap API | ~$0.75 / $3.75 |
 | `claude` | anthropic/claude-sonnet-5.5 (OpenRouter) | premium API | ~$2 / $10 |
@@ -144,9 +145,14 @@ OpenRouter's live model list (cached for a day) and flags ids that no longer exi
 often: check them there before your first paid run. Any other model also works by name: an Ollama tag
 (`llama3.2:3b`) or an OpenRouter id (`openrouter:vendor/model`).
 
-**Setup**: `ollama pull qwen3.5:9b` and `ollama pull gemma4:e4b`; create a key at openrouter.ai and put it
-on the **Model connection** tab (kept in memory only) or `export OPENROUTER_API_KEY=...` before
-`python run.py ui`. Without a key, Auto simply stays local.
+**Setup**: `ollama pull qwen3.5:9b` and `ollama pull gemma4:e4b`; put your API keys on the **Model
+connection** tab (kept in memory only) or export them before `python run.py ui`:
+`OPENROUTER_API_KEY` (Claude, Gemini, DeepSeek via OpenRouter) and/or `DEEPSEEK_API_KEY` (DeepSeek's own
+API, without OpenRouter). A model whose key is missing is skipped, so the router lists put
+`deepseek-direct` before `deepseek`: with a DeepSeek key, DeepSeek is called directly; without it, through
+OpenRouter. Without any key, Auto simply stays local. DeepSeek's API does not report a cost, so MedScout
+computes it from the prices in `config/models.json`; the *Models & data* tab checks the model id against
+DeepSeek's live model list (`deepseek:<id>` also works as a name, e.g. `deepseek:deepseek-v4-pro`).
 
 **Your SQLite database.** On *Models & data → My database*, give the path of a `.sqlite` / `.db` file and
 a note on what is in it. Then:

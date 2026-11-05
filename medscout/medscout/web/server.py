@@ -56,9 +56,10 @@ CONNECTION_ENV = {
     "azure_endpoint": "AZURE_OPENAI_ENDPOINT", "azure_api_key": "AZURE_OPENAI_API_KEY",
     "azure_api_version": "AZURE_OPENAI_API_VERSION", "ollama_host": "OLLAMA_HOST",
     "openfda_api_key": "OPENFDA_API_KEY", "ncbi_email": "NCBI_EMAIL", "ncbi_api_key": "NCBI_API_KEY",
-    "openrouter_api_key": "OPENROUTER_API_KEY",
+    "openrouter_api_key": "OPENROUTER_API_KEY", "deepseek_api_key": "DEEPSEEK_API_KEY",
 }
-SECRET_KEYS = {"openai_api_key", "azure_api_key", "openfda_api_key", "ncbi_api_key", "openrouter_api_key"}
+SECRET_KEYS = {"openai_api_key", "azure_api_key", "openfda_api_key", "ncbi_api_key", "openrouter_api_key",
+               "deepseek_api_key"}
 
 
 class ApiError(Exception):
@@ -474,12 +475,14 @@ class App:
         reg = router.reg
         info = [reg.refresh_local()]
         info.append(reg.refresh_catalog(force=refresh))
+        info += reg.check_direct_providers()
         rows = []
         for m in reg.all():
             ok, why = reg.available(m)
             rows.append({**m.view(), "available": ok, "why": why})
         return {"models": rows, "router": reg.router_cfg, "info": [i for i in info if i],
-                "openrouter_key_set": bool(os.environ.get("OPENROUTER_API_KEY"))}
+                "openrouter_key_set": bool(os.environ.get("OPENROUTER_API_KEY")),
+                "keys": {name: bool(reg.api_key(name)) for name, p in reg.providers.items() if p.get("key_env")}}
 
     def test_model(self, alias: str) -> dict[str, Any]:
         router = self.ask.router
