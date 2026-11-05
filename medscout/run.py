@@ -11,6 +11,7 @@
   python run.py probe --case nordleaf --claim C1        # one model decision, no tool execution
   python run.py eval                                   # scenarios x systems -> eval/results/
   python run.py test                                   # unit + integration tests (no model needed)
+  python run.py                                        # easy start = python launch.py (sets up, opens the console)
   python run.py ui                                     # web console (runs, Ask chat, ...) at http://127.0.0.1:8765
 """
 
@@ -27,6 +28,11 @@ from pathlib import Path
 if sys.version_info < (3, 10):
     sys.exit("MedScout needs Python 3.10 or newer (you have %s). Get it from https://www.python.org/downloads/"
              % sys.version.split()[0])
+
+if len(sys.argv) == 1:
+    # No command (e.g. VS Code's Run button or a double-click): do the easy start - set up the
+    # packages if needed, start Ollama, open the web console. Same as launch.py / "Start MedScout.bat".
+    sys.exit(subprocess.call([sys.executable, str(Path(__file__).resolve().parent / "launch.py")]))
 
 if not sys.flags.utf8_mode and os.environ.get("PYTHONUTF8") != "1":
     # Windows (e.g. a Chinese locale) would read MedScout's UTF-8 text files with the wrong encoding.
