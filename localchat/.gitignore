@@ -1,5 +1,0 @@
-# your chats, uploaded files and settings (may contain an API key) stay on your Mac
-data/
-.venv/
-__pycache__/
-*.pyc

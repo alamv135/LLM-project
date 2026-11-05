@@ -1,31 +1,23 @@
-"""Settings: defaults, where data is stored, and loading/saving settings.json.
+"""Settings for the Ask area: defaults and loading/saving <runs_dir>/ask/settings.json.
 
-Everything the app saves (settings, chats, uploaded files) lives in one folder,
-`localchat/data/` by default (set LOCALCHAT_DATA to use another folder).
+Ask stores everything (settings, chats, uploaded files) in one folder, `runs/ask/` by default,
+which git ignores. The Ollama address follows MedScout's "Model connection" tab (OLLAMA_HOST)
+unless a different address is set here.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict
 from urllib.parse import urlparse
 
-APP_DIR = Path(__file__).resolve().parent.parent          # the localchat/ project folder
-STATIC_DIR = Path(__file__).resolve().parent / "static"   # the web page files
-DATA_DIR = Path(os.environ.get("LOCALCHAT_DATA") or (APP_DIR / "data")).expanduser()
+STATIC_DIR = Path(__file__).resolve().parent / "static"   # the chat page files
 
 DEFAULT_MODEL = "qwen3.5:9b"
 CONTEXT_CHOICES = [8192, 16384, 32768, 65536, 131072]
-
-
-def default_ollama_url() -> str:
-    """Ollama's address. Honours the OLLAMA_HOST variable that Ollama itself uses."""
-    raw = (os.environ.get("OLLAMA_HOST") or "").strip()
-    if not raw:
-        return "http://127.0.0.1:11434"
-    return normalize_url(raw)
 
 
 def normalize_url(raw: str) -> str:
@@ -44,11 +36,13 @@ def normalize_url(raw: str) -> str:
 
 DEFAULTS: Dict[str, Any] = {
     "model": DEFAULT_MODEL,
-    "ollama_url": default_ollama_url(),
+    "ollama_url": "",            # empty = MedScout's connection (OLLAMA_HOST), else http://127.0.0.1:11434
     "num_ctx": 32768,            # context window in tokens (how much the model can "see" at once)
     "temperature": None,         # None = use the model's own recommended value
     "think": False,              # let the model reason step by step before answering (slower)
     "web_search": True,          # let the model search the web / read pages
+    "medtech": True,             # let the model use MedScout's openFDA / ClinicalTrials.gov / PubMed tools
+    "medtech_backend": "live",   # "live" (the real APIs) or a demo case name (offline synthetic mirror)
     "search_backend": "auto",    # auto | duckduckgo | ollama
     "ollama_api_key": "",        # only for Ollama's web search API (optional)
     "custom_instructions": "",
@@ -59,9 +53,9 @@ DEFAULTS: Dict[str, Any] = {
 
 
 class Settings:
-    """Thread-safe settings stored in DATA_DIR/settings.json."""
+    """Thread-safe settings stored in <data_dir>/settings.json."""
 
-    def __init__(self, data_dir: Path = DATA_DIR):
+    def __init__(self, data_dir: Path):
         self.path = Path(data_dir) / "settings.json"
         self._lock = threading.Lock()
         self._values = dict(DEFAULTS)
@@ -82,6 +76,14 @@ class Settings:
         with self._lock:
             return dict(self._values)
 
+    def ollama_url(self) -> str:
+        """The address to use now: this setting, else MedScout's connection, else the default."""
+        own = self.get("ollama_url")
+        if own:
+            return own
+        env = (os.environ.get("OLLAMA_HOST") or "").strip()
+        return normalize_url(env) if env else "http://127.0.0.1:11434"
+
     def api_key(self) -> str:
         """Ollama API key for web search: the settings value, else the OLLAMA_API_KEY variable."""
         return (self.get("ollama_api_key") or os.environ.get("OLLAMA_API_KEY") or "").strip()
@@ -92,6 +94,7 @@ class Settings:
         values["ollama_api_key"] = ""
         values["ollama_api_key_set"] = bool(self.api_key())
         values["ollama_api_key_from_env"] = bool(os.environ.get("OLLAMA_API_KEY")) and not self.get("ollama_api_key")
+        values["ollama_url_effective"] = self.ollama_url()
         values["data_dir"] = str(self.path.parent)
         return values
 
@@ -105,15 +108,19 @@ class Settings:
                     continue          # empty field = keep the saved key
                 value = str(value).strip()
             elif key == "ollama_url":
-                value = normalize_url(str(value or DEFAULTS["ollama_url"]))
+                value = normalize_url(str(value)) if str(value or "").strip() else ""
             elif key == "num_ctx":
                 value = max(2048, min(262144, int(value)))
             elif key == "temperature":
                 value = None if value in (None, "") else max(0.0, min(2.0, float(value)))
             elif key == "max_tool_rounds":
                 value = max(1, min(12, int(value)))
-            elif key in ("think", "web_search"):
+            elif key in ("think", "web_search", "medtech"):
                 value = bool(value)
+            elif key == "medtech_backend":
+                value = str(value or "live").strip()
+                if value != "live" and not re.fullmatch(r"[a-z0-9_-]{1,40}", value):
+                    continue
             elif key == "search_backend" and value not in ("auto", "duckduckgo", "ollama"):
                 continue
             elif key == "theme" and value not in ("system", "light", "dark"):

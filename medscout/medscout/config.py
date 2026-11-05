@@ -66,6 +66,6 @@ class Settings:
             return self.model
         return {
             "mock": "mock-scripted-policy",
-            "ollama": "llama3.2:3b",
+            "ollama": "qwen3.5:9b",       # tools + vision + thinking; ~6.6 GB, fits a 16-24 GB Mac
             "openai": "gpt-4o-mini",
         }.get(self.provider, "")

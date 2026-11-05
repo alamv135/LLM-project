@@ -25,7 +25,7 @@ pip install -r requirements.txt
 ```bash
 python run.py ui --open                 # web interface + run controller at http://127.0.0.1:8765
 python run.py demo                      # same agent from the terminal: fictional Nordleaf Cardio case, offline
-python run.py test                      # 44 unit/integration tests, no model or network needed
+python run.py test                      # 84 unit/integration tests, no model or network needed
 python run.py eval                      # 4 scenarios x {medscout, direct, rag} -> eval/results/
 ```
 
@@ -43,6 +43,7 @@ browser console. Use `--port` to change the port and `--open` to open the browse
 | **Control** | Watch the run live (phase, tasks, activity feed, tokens, cost) and steer it: **pause / resume / stop**, **step** through each model decision, **approve, edit or reject** each tool batch, **review claims** and **review the plan** (reorder, drop, change skill, priority or question), **answer the agent's questions**, send **notes** to the agent, **skip** a task. Gates can be switched on or off while the run is going. |
 | **Results** | Rendered brief, findings with rationale / evidence / conflicts / open questions, source log, claims; download brief.md, record.json, trace.jsonl. |
 | **History** | Every saved run; open it or **resume** a stopped or interrupted run from its checkpoint. |
+| **Ask** | A free chat with the local model (see [Ask](#ask-free-questions) below): web search, FDA / ClinicalTrials.gov / PubMed lookups with numbered sources, file uploads, and **Ask about this run** (from Results or History) to discuss a finished brief. |
 | **Tools** | Run any tool through the real gateway (validation, timeout, retries, fault injection) without a model. |
 | **Prompts & skills** | Edit `prompts/*.md`, every `SKILL.md` and reference, and `eval/cases.json`; changes apply to the next run. |
 | **Evaluation** | Run the scenarios against MedScout and the baselines and compare the metrics; load past results. |
@@ -53,6 +54,31 @@ task and model decision, and `request()` when it needs a human (claim review, pl
 a question, a step). The run thread blocks until you answer in the browser. Time spent waiting for you
 is excluded from the run and task deadlines. A stop checkpoints the run so it can be resumed later.
 Only one run (or evaluation) executes at a time.
+
+### Ask: free questions
+
+The **Ask** tab is a private, Claude-style chat with your Ollama model, built into the console
+(code in `medscout/ask/`). Use it for anything that is not a full diligence run: "what is a De Novo
+request?", "does this company have a 510(k)?", "explain this table in the brief", "read this PDF".
+
+* Answers stream in with Markdown, tables, code and math. Chats are saved on the left.
+* **Web search** (globe button): the model searches (DuckDuckGo, or Ollama's web search API with a key
+  in Ask's settings) and reads pages, then cites them as [1] [2]. Click a number to open the source.
+* **FDA & trials** (flask button): the model can call MedScout's own `fda_510k_search`,
+  `fda_pma_search`, `fda_classification_lookup`, `clinicaltrials_search` and `pubmed_search` through
+  the same tool gateway as a run (schema check, timeout, retries, cache). Records become numbered
+  sources linking to the FDA / registry / PubMed page. In Ask's settings choose **Live** (the real
+  services) or a demo case (offline synthetic mirror, labelled as synthetic in the answer).
+* **Files**: attach PDF, Word, Excel, PowerPoint, text/code or images (qwen3.5 can read images, e.g.
+  a pitch-deck screenshot). Long files are cut to the most relevant parts and the model can search the rest.
+* **Ask about this run**: in Results (or History) this button opens Ask with the run's `brief.md`
+  attached and a starter question.
+* **Think** (light bulb): step-by-step reasoning before the answer; slower, better for hard questions.
+* It uses the Ollama address from the **Model connection** tab (`OLLAMA_HOST`), default
+  `http://127.0.0.1:11434`, and needs a model with tool support for search. If the model is not
+  downloaded, Ask shows a **Download** button.
+* Chats, uploads and Ask's settings are stored in `runs/ask/` (git-ignored). Only search queries and the
+  pages / records the model looks up leave your computer.
 
 ### Other commands
 
@@ -71,12 +97,32 @@ MEDSCOUT_MOCK_FAULTS="malformed:1,ungrounded:1" python run.py demo
 
 | Provider | Setup | Command |
 |---|---|---|
-| Ollama (local, Lec 4) | `ollama pull llama3.2:3b` (a tool-capable 3B+ model is recommended; 1B struggles with the JSON protocol) | `python run.py demo --provider ollama --model llama3.2:3b` |
+| Ollama (local, Lec 4) | `ollama pull qwen3.5:9b` (default; see below. 1B models struggle with the JSON protocol) | `python run.py demo --provider ollama --model qwen3.5:9b` |
 | OpenAI-compatible | `export OPENAI_BASE_URL=... OPENAI_API_KEY=...` | `python run.py demo --provider openai --model <model>` |
 | Azure-style (e.g. HKU GenAI quota, if Azure-compatible) | `export AZURE_OPENAI_ENDPOINT=... AZURE_OPENAI_API_KEY=... AZURE_OPENAI_API_VERSION=...` | `python run.py demo --provider openai --model <deployment>` |
 
 Cost accounting: `export MEDSCOUT_PRICE_IN=<USD per 1M input tokens> MEDSCOUT_PRICE_OUT=<...>`.
 Keep credentials in environment variables only (never in the repo / submission).
+
+### Which local model? (M4 MacBook Air, 24 GB)
+
+Rule of thumb: the model file must fit in memory with room to spare (macOS, the browser and the
+context window need ~6-8 GB), and generation speed is roughly *memory bandwidth ÷ GB read per token*.
+The M4 MacBook Air reads about 120 GB/s, so a 6.6 GB model tops out near ~18 tokens/s.
+
+| Model | Download | Use it for | Notes |
+|---|---|---|---|
+| **qwen3.5:9b** (default) | ~6.6 GB | Ask **and** MedScout runs | Tools, vision (images) and optional thinking; 256K context; lots of memory headroom; writes Chinese and English. |
+| gpt-oss:20b | ~13-14 GB | Second model in the evaluation | Mixture-of-experts (only ~3.6B parameters active per token), strong at tool use and reasoning. No vision; always reasons; community reports of unreliable strict-JSON output in Ollama, so check MedScout's format-repair counts. |
+| llama3.2:3b | ~2 GB | Small-model data point in the evaluation | Fast but weak at multi-step research. |
+| 27B+ dense / 35B MoE models | ~17-24 GB | Avoid on 24 GB | Too tight with macOS and the context; ~6 tokens/s on an Air. |
+
+Tips: use the **same model** for Ask and runs (two different models loaded at once can exceed 24 GB).
+Ask uses a 32K context and runs use 8K (`OLLAMA_NUM_CTX`); start the console with
+`OLLAMA_NUM_CTX=32768 python run.py ui` if switching between them makes Ollama reload the model.
+`MEDSCOUT_OLLAMA_THINK=false` (or `true`) switches qwen3.5's thinking off/on for run decisions; unset
+uses the model default. The Air has no fan, so long evaluations slow down as it warms up. All of
+these numbers are estimates: measure with `python run.py eval --provider ollama --model <model>`.
 
 ### Use live public data
 
@@ -186,6 +232,8 @@ medscout/
   control.py               run controller: gates, reviewer requests, notes, skip, pause/stop
   web/server.py            local web server + JSON API (python run.py ui)
   web/static/              browser console (index.html, app.js, app.css; no build step)
+  ask/                     the Ask tab: chat loop (chat.py), Ollama client, web search + page reading (web.py),
+                           file reading (files.py), MedScout tools in chat (medtech.py), routes, static/ page
   harness.py               bounded ReAct loop for one research task
   context.py               context builder, budget, compression
   protocol.py              JSON output contracts + parser
@@ -200,7 +248,8 @@ skills/                    claim-extraction, regulatory-check (+ references/), c
                            competitive-context, commercial-signals
 data/cases/                nordleaf (ordinary), quillon (failure) — FICTIONAL, synthetic mirrors
 eval/cases.json            scenarios + reference outcomes
-tests/                     unittest suite (python run.py test), incl. controller and web API tests
+tests/                     unittest suite (python run.py test), incl. controller, web API and Ask tests
+                           (Ask runs against tests/fake_ollama.py, a pretend Ollama)
 ```
 
 ## Mocks, unverified parts and limitations
@@ -220,6 +269,9 @@ tests/                     unittest suite (python run.py test), incl. controller
 * Not yet integrated: CMS coverage, NIH RePORTER, patents, web pages, DOCX/PPTX, OCR, PubMed abstracts,
   De Novo database. Matching uses simple lexical rules; a retriever/reranker would help on paraphrases.
 * Token counts for the mock are estimates (chars / 4).
+* **Ask** was tested against a fake Ollama and a fake search page only: real models, live DuckDuckGo
+  results, Safari and the Mac-only file helpers (`sips` for HEIC photos, `textutil` for .doc/.rtf) have
+  not been tried yet.
 
 ## Next steps (suggested)
 

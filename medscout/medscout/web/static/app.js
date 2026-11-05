@@ -154,19 +154,21 @@ function setRun(id) {
 }
 
 // ------------------------------------------------------------------ router
-const VIEWS = ["new", "control", "results", "history", "tools", "files", "eval", "connection"];
+const VIEWS = ["new", "control", "results", "history", "ask", "tools", "files", "eval", "connection"];
 function route() {
   const name = (location.hash || "#new").slice(1);
   const view = VIEWS.includes(name) ? name : "new";
   for (const v of VIEWS) $("#view-" + v).hidden = v !== view;
   document.querySelectorAll("nav.tabs a").forEach((a) => a.setAttribute("aria-current", a.getAttribute("href") === "#" + view ? "page" : "false"));
-  const build = { new: buildNew, control: buildControl, results: buildResults, history: buildHistory, tools: buildTools,
+  document.body.classList.toggle("ask-mode", view === "ask");
+  const build = { new: buildNew, control: buildControl, results: buildResults, history: buildHistory, ask: buildAsk, tools: buildTools,
     files: buildFiles, eval: buildEval, connection: buildConnection }[view];
   if (!S.built[view]) { build(); S.built[view] = true; }
   if (view === "control") { redrawFeed(); renderControl([]); }
   if (view === "results") renderResults(true);
   if (view === "history") refreshHistory();
   if (view === "eval") refreshEval();
+  if (view === "ask") sizeAsk();
 }
 
 // ------------------------------------------------------------------ NEW RUN
@@ -719,7 +721,8 @@ async function renderResults(force) {
   $("#res-title").textContent = run.company + (run.product ? " — " + run.product : "");
   $("#res-meta").textContent = `${run.run_id} · ${run.status} · ${run.config.provider}/${run.config.model}`;
   fill($("#res-downloads"), statusPill(run.status), ...["brief.md", "record.json", "trace.jsonl", "summary.json"].map((n) =>
-    h("a", { href: `/api/runs/${run.run_id}/download/${n}`, class: "small", text: n, download: true })));
+    h("a", { href: `/api/runs/${run.run_id}/download/${n}`, class: "small", text: n, download: true })),
+    run.has_brief ? h("button", { type: "button", class: "small primary", on: { click: () => askAboutRun(run.run_id) } }, "Ask about this run") : null);
   const tab = S.resultsTab;
   const sig = [run.run_id, run.status, run.phase, run.has_brief, run.evidence.length, Object.keys(run.findings).length,
     run.claims.length, tab, S.verdictFilter].join("|");
@@ -807,8 +810,26 @@ async function refreshHistory() {
         h("td", {}, Object.entries(r.verdicts).map(([v, n]) => h("span", { style: "margin-right:4px" }, verdictPill(v), " " + n))),
         h("td", {}, h("div", { class: "row" },
           h("button", { type: "button", class: "small", on: { click: () => { setRun(r.run_id); poll(); location.hash = r.status === "done" ? "#results" : "#control"; } } }, "Open"),
-          ["stopped", "interrupted", "error"].includes(r.status) ? h("button", { type: "button", class: "small primary", on: { click: () => resumeRun(r.run_id) } }, "Resume") : null))))))));
+          ["stopped", "interrupted", "error"].includes(r.status) ? h("button", { type: "button", class: "small primary", on: { click: () => resumeRun(r.run_id) } }, "Resume") : null,
+          r.has_brief ? h("button", { type: "button", class: "small", on: { click: () => askAboutRun(r.run_id) } }, "Ask") : null))))))));
   } catch (e) { fill(body, h("div", { class: "callout bad", text: e.message })); }
+}
+
+// ------------------------------------------------------------------ ASK
+// The free-question chat (medscout/ask/) runs in a frame below the tab bar. It is built once and
+// kept, so switching tabs does not interrupt an answer.
+function buildAsk() {
+  fill($("#view-ask"), h("iframe", { id: "ask-frame", src: "/ask/", title: "Ask: free questions to the local model" }));
+  window.addEventListener("resize", sizeAsk);
+}
+function sizeAsk() {
+  const f = $("#ask-frame");
+  if (f) f.style.height = Math.max(420, window.innerHeight - $(".topbar").offsetHeight) + "px";
+}
+function askAboutRun(runId) {
+  if (!S.built.ask) { buildAsk(); S.built.ask = true; }
+  $("#ask-frame").src = "/ask/#attach-run=" + runId;   // the chat attaches the run's brief.md
+  location.hash = "#ask";
 }
 
 // ------------------------------------------------------------------ TOOLS

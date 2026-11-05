@@ -74,11 +74,16 @@ class OllamaLLM(BaseLLM):
         host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
         # JSON-schema constrained decoding when the schema is simple enough; plain JSON mode otherwise.
         fmt: Any = schema if (schema and "oneOf" not in json.dumps(schema)) else "json"
+        payload: dict[str, Any] = {"model": self.model, "messages": messages, "stream": False, "format": fmt,
+                                   "options": {"temperature": self.temperature,
+                                               "num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "8192"))}}
+        # Thinking models (qwen3.5, ...): MEDSCOUT_OLLAMA_THINK=true|false turns step-by-step reasoning
+        # before each JSON decision on or off. Unset = the model's own default.
+        think = os.environ.get("MEDSCOUT_OLLAMA_THINK", "").strip().lower()
+        if think in ("true", "false"):
+            payload["think"] = think == "true"
         t0 = time.perf_counter()
-        data = _post(f"{host}/api/chat", {"model": self.model, "messages": messages, "stream": False,
-                                          "format": fmt, "options": {"temperature": self.temperature,
-                                                                     "num_ctx": int(os.environ.get("OLLAMA_NUM_CTX", "8192"))}},
-                     {}, self.timeout_s)
+        data = _post(f"{host}/api/chat", payload, {}, self.timeout_s)
         text = data.get("message", {}).get("content", "")
         return LLMResult(text, int(data.get("prompt_eval_count", 0)), int(data.get("eval_count", 0)),
                          round((time.perf_counter() - t0) * 1000, 1), self.model)

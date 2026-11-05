@@ -1,4 +1,4 @@
-"""Tests for reading uploaded files, keyword search, and the web helpers (no internet needed)."""
+"""Ask: reading uploaded files, keyword search, web helpers and settings (no internet needed)."""
 import importlib.util
 import io
 import json
@@ -9,7 +9,9 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from localchat import chat, config, files, web
+from medscout.ask import chat, config, files, web
+
+from . import fake_ollama
 
 W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
 
@@ -169,7 +171,7 @@ DDG_LITE = """<table><tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=ht
 
 class Web(unittest.TestCase):
     def test_parse_duckduckgo_html_page(self):
-        import tests.fake_ollama as fake
+        fake = fake_ollama
         results = web.parse_duckduckgo(fake.DDG_PAGE.replace("__BASE__", "https%3A%2F%2Fa.example"))
         self.assertEqual([r["url"] for r in results], ["https://a.example/article", "https://qwen.example/blog/qwen3.5"])
         self.assertEqual(results[0]["title"], "Ollama 0.12 release notes")
@@ -181,7 +183,7 @@ class Web(unittest.TestCase):
         self.assertEqual(results[1]["url"], "https://example.org/b")
 
     def test_html_to_text(self):
-        import tests.fake_ollama as fake
+        fake = fake_ollama
         title, text = web.html_to_text(fake.ARTICLE)
         self.assertEqual(title, "Ollama 0.12 release notes")
         self.assertIn("This release adds a web search API", text)
@@ -226,6 +228,22 @@ class Config(unittest.TestCase):
         self.assertEqual(n("127.0.0.1:11500"), "http://127.0.0.1:11500")
         self.assertEqual(n("https://ollama.example/"), "https://ollama.example:443")
         self.assertEqual(n("http://[::1]:11434"), "http://[::1]:11434")
+
+    def test_medtech_backend_setting(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            s = config.Settings(tmp)
+            self.assertEqual(s.get("medtech_backend"), "live")
+            s.update({"medtech_backend": "nordleaf"})
+            self.assertEqual(s.get("medtech_backend"), "nordleaf")
+            s.update({"medtech_backend": "../../etc"})          # refused, keeps the old value
+            self.assertEqual(s.get("medtech_backend"), "nordleaf")
+            s.update({"ollama_url": "127.0.0.1:11500"})
+            self.assertEqual(s.ollama_url(), "http://127.0.0.1:11500")
+            s.update({"ollama_url": ""})
+            self.assertEqual(s.get("ollama_url"), "")
+        finally:
+            shutil.rmtree(tmp)
 
     def test_settings_hide_key(self):
         tmp = Path(tempfile.mkdtemp())

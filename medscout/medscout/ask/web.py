@@ -28,12 +28,12 @@ BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 )
-DDG_HTML_URL = os.environ.get("LOCALCHAT_DDG_URL", "https://html.duckduckgo.com/html/")
-DDG_LITE_URL = os.environ.get("LOCALCHAT_DDG_LITE_URL", "https://lite.duckduckgo.com/lite/")
+DDG_HTML_URL = os.environ.get("MEDSCOUT_ASK_DDG_URL", "https://html.duckduckgo.com/html/")
+DDG_LITE_URL = os.environ.get("MEDSCOUT_ASK_DDG_LITE_URL", "https://lite.duckduckgo.com/lite/")
 OLLAMA_SEARCH_URL = "https://ollama.com/api/web_search"
 OLLAMA_FETCH_URL = "https://ollama.com/api/web_fetch"
 # Tests (and only tests) may allow fetching from this computer.
-ALLOW_PRIVATE = os.environ.get("LOCALCHAT_ALLOW_PRIVATE_FETCH") == "1"
+ALLOW_PRIVATE = os.environ.get("MEDSCOUT_ASK_ALLOW_PRIVATE_FETCH") == "1"
 MAX_DOWNLOAD = 5_000_000
 
 

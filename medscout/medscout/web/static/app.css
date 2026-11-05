@@ -229,3 +229,8 @@ pre.json { background: var(--code); border: 1px solid var(--line); border-radius
 .file-list button[aria-current="true"] { background: var(--accent-soft); color: var(--accent); }
 
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+
+/* Ask tab: the chat fills the space under the tab bar */
+body.ask-mode main.wrap { max-width: none; padding: 0; }
+body.ask-mode main.wrap > section.view { gap: 0; }
+#ask-frame { display: block; width: 100%; border: 0; background: var(--bg); }

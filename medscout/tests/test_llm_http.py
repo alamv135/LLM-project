@@ -72,6 +72,12 @@ class TestHTTPClients(unittest.TestCase):
         self.assertEqual((r.tokens_in, r.tokens_out), (111, 22))
         self.assertEqual(SEEN[0]["body"]["format"], schema)       # constrained decoding request
         self.assertFalse(SEEN[0]["body"]["stream"])
+        self.assertNotIn("think", SEEN[0]["body"])                 # model default unless asked
+        SEEN.clear()
+        with env(OLLAMA_HOST=self.url, NO_PROXY="127.0.0.1", MEDSCOUT_OLLAMA_THINK="false"):
+            OllamaLLM("qwen3.5:9b").complete([{"role": "system", "content": "s"},
+                                              {"role": "user", "content": "PHASE: plan\nCLAIMS_JSON:\n[]\nEND_CLAIMS"}], schema)
+        self.assertIs(SEEN[0]["body"]["think"], False)
 
     def test_full_workflow_through_openai_client(self):
         s = temp_settings(provider="openai", model="test-model", price_in_per_m=1.0, price_out_per_m=2.0)

@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Local Chat</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23c8643f'/%3E%3Cpath d='M9 11h14M9 16h10M9 21h7' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
-<link rel="stylesheet" href="/static/app.css">
+<title>MedScout Ask</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f6f74'/%3E%3Cpath d='M9 11h14M9 16h10M9 21h7' stroke='white' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/ask/static/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/ask/static/app.css">
 </head>
 <body>
 <div id="app" class="app">
   <aside id="sidebar" class="sidebar" aria-label="Chats">
     <div class="sb-top">
-      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Local Chat</div>
+      <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Ask MedScout</div>
       <button id="sidebar-close" class="icon-btn" title="Hide sidebar" aria-label="Hide sidebar">
         <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg>
       </button>
@@ -79,6 +79,10 @@
               <svg viewBox="0 0 24 24"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.4 1 1.1 1 1.8V16h5v-.3c0-.7.4-1.4 1-1.8A6 6 0 0 0 12 3z"/></svg>
               <span>Think</span>
             </button>
+            <button type="button" id="medtech-toggle" class="pill" aria-pressed="true" title="Let the model search openFDA (510(k), PMA, classification), ClinicalTrials.gov and PubMed">
+              <svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.7 3h10.6a2 2 0 0 0 1.7-3l-5-9V3"/><path d="M7.5 15h9"/></svg>
+              <span>FDA &amp; trials</span>
+            </button>
             <span class="spacer"></span>
             <button type="submit" id="send-btn" class="send" title="Send (Enter)" aria-label="Send">
               <svg class="i-send" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
@@ -86,7 +90,7 @@
             </button>
           </div>
         </form>
-        <p class="disclaimer">Runs on your Mac with Ollama. Answers can be wrong, so check important facts.</p>
+        <p class="disclaimer">Runs on your Mac with Ollama. Answers can be wrong, so check important facts against the sources.</p>
       </div>
     </div>
   </main>
@@ -106,7 +110,10 @@
           <datalist id="model-names"></datalist>
           <small>Any model from ollama.com/library, e.g. qwen3.5:9b. If it isn't downloaded yet, the page offers to download it.</small>
         </label>
-        <label>Ollama address<input name="ollama_url" placeholder="http://127.0.0.1:11434"></label>
+        <label>Ollama address
+          <input name="ollama_url" placeholder="Same as the console's Model connection">
+          <small id="ollama-url-state">Leave empty to use the console's Model connection tab.</small>
+        </label>
         <label>Context window
           <select name="num_ctx"></select>
           <small>How much text the model can look at at once (your chat, files, web pages). Bigger needs more memory and is slower. 32K is a good start on a 16 GB Mac.</small>
@@ -114,6 +121,13 @@
         <label>Temperature
           <input name="temperature" type="number" min="0" max="2" step="0.1" placeholder="Model default">
           <small>Leave empty to use the model's recommended value. Lower = more focused, higher = more creative.</small>
+        </label>
+      </section>
+      <section>
+        <h3>FDA &amp; trials databases</h3>
+        <label>Data
+          <select name="medtech_backend"></select>
+          <small>Live = the real openFDA, ClinicalTrials.gov and PubMed services (needs internet). A demo case = MedScout's offline, synthetic test data.</small>
         </label>
       </section>
       <section>
@@ -137,7 +151,7 @@
       <section>
         <h3>Personal</h3>
         <label>Custom instructions
-          <textarea name="custom_instructions" rows="4" placeholder="e.g. I am a university student in Hong Kong. Explain things simply and give examples."></textarea>
+          <textarea name="custom_instructions" rows="4" placeholder="e.g. I am analysing early-stage MedTech companies for an investment course. Explain regulatory terms simply."></textarea>
           <small>Added to every conversation.</small>
         </label>
         <label>Appearance
@@ -147,7 +161,7 @@
             <option value="dark">Dark</option>
           </select>
         </label>
-        <p class="muted small">Your chats and files are stored in <code id="data-dir"></code></p>
+        <p class="muted small">Your chats and files are stored in <code id="data-dir"></code> (never uploaded to git).</p>
       </section>
     </div>
     <footer>
@@ -157,11 +171,11 @@
   </form>
 </dialog>
 
-<script src="/static/vendor/marked.min.js"></script>
-<script src="/static/vendor/purify.min.js"></script>
-<script src="/static/vendor/katex/katex.min.js"></script>
-<script src="/static/vendor/hljs/highlight.min.js"></script>
-<script src="/static/markdown.js"></script>
-<script src="/static/app.js"></script>
+<script src="/ask/static/vendor/marked.min.js"></script>
+<script src="/ask/static/vendor/purify.min.js"></script>
+<script src="/ask/static/vendor/katex/katex.min.js"></script>
+<script src="/ask/static/vendor/hljs/highlight.min.js"></script>
+<script src="/ask/static/markdown.js"></script>
+<script src="/ask/static/app.js"></script>
 </body>
 </html>

@@ -1,8 +1,10 @@
-/* Local Chat - the page. Talks to the Python server (server.py) through /api/... */
+/* MedScout Ask - the chat page. Talks to medscout/ask/routes.py through /api/ask/... */
 (function () {
   "use strict";
 
   const $ = (sel) => document.querySelector(sel);
+  const API = "/api/ask";
+  const isWebUrl = (u) => /^https?:\/\//i.test(u || "");
   const el = (tag, cls, text) => {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -22,6 +24,7 @@
     x: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>',
     pencil: '<svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>',
     trash: '<svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
+    flask: '<svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.7 3h10.6a2 2 0 0 0 1.7-3l-5-9V3"/><path d="M7.5 15h9"/></svg>',
     warn: '<svg viewBox="0 0 24 24"><path d="M12 3 2 20h20zM12 10v4M12 17h.01"/></svg>',
   };
 
@@ -100,9 +103,9 @@
   // ----- status / models --------------------------------------------------------------------------
   async function refreshStatus() {
     try {
-      state.status = await api("/api/status");
+      state.status = await api(API + "/status");
     } catch (e) {
-      state.status = { ollama: false, ollama_error: "Local Chat server is not responding." };
+      state.status = { ollama: false, ollama_error: "The MedScout server is not responding." };
     }
     renderStatus();
   }
@@ -130,13 +133,16 @@
       sel.appendChild(o);
     }
     sel.value = names.includes(current) ? current : names.includes(current + ":latest") ? current + ":latest" : current;
-    $("#welcome-sub").textContent = "Private chat with " + (current || "your model") + " on your Mac";
+    $("#welcome-sub").textContent = "Ask anything. " + (current || "Your model") + " runs on your Mac and can check the web, FDA, ClinicalTrials.gov and PubMed.";
 
     const caps = s.capabilities || [];
     const hasCaps = caps.length > 0;
     const web = $("#web-toggle");
     const think = $("#think-toggle");
+    const med = $("#medtech-toggle");
     web.disabled = hasCaps && !caps.includes("tools");
+    med.disabled = web.disabled;
+    med.title = med.disabled ? "This model can't use tools" : "Let the model search openFDA (510(k), PMA, classification), ClinicalTrials.gov and PubMed";
     think.disabled = hasCaps && !caps.includes("thinking");
     web.title = web.disabled ? "This model can't use tools, so it can't search" : "Let the model search the web and read pages";
     think.title = think.disabled ? "This model has no thinking mode" : "Let the model reason step by step before answering (slower, better for hard questions)";
@@ -178,7 +184,7 @@
     const info = el("small", "muted");
     text.appendChild(info);
     try {
-      const res = await fetch("/api/pull", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }) });
+      const res = await fetch(API + "/pull", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }) });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "HTTP " + res.status);
       await readLines(res, (ev) => {
         if (ev.error) throw new Error(ev.error);
@@ -201,12 +207,12 @@
 
   // ----- settings --------------------------------------------------------------------------------
   async function loadSettings() {
-    state.settings = await api("/api/settings");
+    state.settings = await api(API + "/settings");
     applyTheme(state.settings.theme);
   }
 
   async function saveSettings(changes) {
-    state.settings = await api("/api/settings", { json: changes });
+    state.settings = await api(API + "/settings", { json: changes });
     applyTheme(state.settings.theme);
   }
 
@@ -214,6 +220,10 @@
     const web = $("#web-toggle");
     const think = $("#think-toggle");
     web.setAttribute("aria-pressed", String(!!state.settings.web_search && !web.disabled));
+    const med = $("#medtech-toggle");
+    med.setAttribute("aria-pressed", String(!!state.settings.medtech && !med.disabled));
+    const demo = state.settings.medtech_backend && state.settings.medtech_backend !== "live";
+    med.querySelector("span").textContent = demo ? "FDA & trials (demo data)" : "FDA & trials";
     think.setAttribute("aria-pressed", String(!!state.settings.think && !think.disabled));
   }
 
@@ -235,6 +245,13 @@
     dl.innerHTML = "";
     ((state.status && state.status.models) || []).forEach((m) => { const o = el("option"); o.value = m.name; dl.appendChild(o); });
     f.elements.ollama_url.value = s.ollama_url || "";
+    $("#ollama-url-state").textContent = s.ollama_url ? "Leave empty to use the console's Model connection tab."
+      : "Now using " + (s.ollama_url_effective || "http://127.0.0.1:11434") + " (from the console's Model connection tab, or the default).";
+    const mb = f.elements.medtech_backend;
+    mb.innerHTML = "";
+    [["live", "Live: the real public databases"]].concat(((state.status && state.status.demo_cases) || []).map((c) => [c, "Demo case: " + c + " (offline, synthetic)"]))
+      .forEach(([v, l]) => { const o = el("option", null, l); o.value = v; mb.appendChild(o); });
+    mb.value = s.medtech_backend || "live";
     f.elements.temperature.value = s.temperature == null ? "" : s.temperature;
     f.elements.search_backend.value = s.search_backend;
     f.elements.ollama_api_key.value = "";
@@ -258,6 +275,7 @@
     const changes = {
       model: f.model.value.trim() || state.settings.model,
       ollama_url: f.ollama_url.value,
+      medtech_backend: f.medtech_backend.value,
       num_ctx: +f.num_ctx.value,
       temperature: f.temperature.value === "" ? null : +f.temperature.value,
       search_backend: f.search_backend.value,
@@ -278,7 +296,7 @@
 
   // ----- sidebar: chat list ----------------------------------------------------------------------
   async function loadChats() {
-    state.chats = (await api("/api/chats")).chats;
+    state.chats = (await api(API + "/chats")).chats;
     renderChatList();
   }
 
@@ -339,7 +357,7 @@
       const title = input.value.trim();
       if (save && title && title !== c.title) {
         try {
-          await api("/api/chats/" + c.id + "/rename", { json: { title } });
+          await api(API + "/chats/" + c.id + "/rename", { json: { title } });
           c.title = title;
           if (state.chat && state.chat.id === c.id) {
             state.chat.title = title;
@@ -359,7 +377,7 @@
   async function deleteChat(c) {
     if (!confirm('Delete "' + (c.title || "this chat") + '"? Its uploaded files are deleted too.')) return;
     try {
-      await api("/api/chats/" + c.id, { method: "DELETE" });
+      await api(API + "/chats/" + c.id, { method: "DELETE" });
     } catch (e) { toast(e.message); }
     state.chats = state.chats.filter((x) => x.id !== c.id);
     if (state.chatId === c.id) newChat();
@@ -388,7 +406,7 @@
   async function openChat(id) {
     if (state.busy && state.chatId !== id) stopGenerating();
     try {
-      state.chat = await api("/api/chats/" + id);
+      state.chat = await api(API + "/chats/" + id);
       state.chatId = id;
     } catch (e) {
       toast("Chat not found");
@@ -404,7 +422,31 @@
     setTimeout(() => scrollToBottom(false), 150);
   }
 
+  async function attachRun(runId) {
+    history.replaceState(null, "", location.pathname);
+    newChat();
+    const item = { key: "run-" + runId, name: "MedScout brief (" + runId + ")", status: "uploading", meta: null, url: null };
+    state.pending.push(item);
+    renderPending();
+    try {
+      item.meta = await api(API + "/attach-run", { json: { run_id: runId } });
+      item.name = item.meta.name;
+      item.status = "ready";
+      if (!$("#input").value.trim()) {
+        $("#input").value = "Summarise this MedScout brief: the main findings, the weakest claims and what I should check next.";
+        autoGrow();
+      }
+    } catch (e) {
+      item.status = "error";
+      item.error = e.message;
+    }
+    renderPending();
+    $("#input").focus();
+  }
+
   function route() {
+    const run = location.hash.match(/^#attach-run=([0-9a-f-]+)$/);
+    if (run) return attachRun(run[1]);
     const m = location.hash.match(/^#\/c\/([\w-]+)$/);
     if (m) {
       if (m[1] !== state.chatId) openChat(m[1]);
@@ -424,7 +466,7 @@
     const msgs = (state.chat && state.chat.messages) || [];
     $("#main").classList.toggle("empty", msgs.length === 0 && !state.busy);
     $("#chat-title").textContent = (state.chat && state.chat.title) || "";
-    document.title = state.chat ? state.chat.title + " · Local Chat" : "Local Chat";
+    document.title = state.chat ? state.chat.title + " · MedScout Ask" : "MedScout Ask";
     setGreeting();
     msgs.forEach((m, i) => box.appendChild(m.role === "user" ? userView(m) : assistantView(m, i === msgs.length - 1).root));
   }
@@ -435,7 +477,7 @@
     const bubble = el("div", "bubble");
     if (m.attachments && m.attachments.length) {
       const row = el("div", "att-row");
-      m.attachments.forEach((a) => row.appendChild(attachmentChip(a, "/api/files/" + a.id)));
+      m.attachments.forEach((a) => row.appendChild(attachmentChip(a, API + "/files/" + a.id)));
       bubble.appendChild(row);
     }
     if (m.content) bubble.appendChild(el("div", "user-text", m.content));
@@ -523,23 +565,25 @@
     node.classList.toggle("failed", p.ok === false);
     const head = el("button", "tool-head");
     head.type = "button";
-    const icon = p.name === "web_search" ? ICON.globe : p.name === "fetch_url" ? ICON.page : ICON.filesearch;
+    const icon = p.name === "web_search" ? ICON.globe : p.name === "fetch_url" ? ICON.page : p.name === "search_files" ? ICON.filesearch : ICON.flask;
     head.innerHTML = '<span class="tool-icon">' + icon + '</span><span class="tool-label"></span><span class="tool-count"></span>' + ICON.chevron;
     let label = p.label || p.name;
     if (p.pending) label = label.replace(/^Searched/, "Searching").replace(/^Read /, "Reading ") + "…";
     head.querySelector(".tool-label").textContent = label;
     const results = p.results || [];
     if (p.ok === false) head.querySelector(".tool-count").textContent = "failed";
-    else if (p.name === "web_search" && !p.pending) head.querySelector(".tool-count").textContent = results.length + (results.length === 1 ? " result" : " results");
+    else if (p.name !== "fetch_url" && p.name !== "search_files" && !p.pending) head.querySelector(".tool-count").textContent = results.length + (results.length === 1 ? " result" : " results");
     node.appendChild(head);
     const list = el("div", "tool-body");
     list.hidden = true;
     if (p.error) list.appendChild(el("p", "tool-error", p.error));
     results.forEach((r) => {
-      const a = el("a", "result");
-      a.href = r.url;
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
+      const a = el(isWebUrl(r.url) ? "a" : "div", "result");
+      if (isWebUrl(r.url)) {
+        a.href = r.url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+      }
       a.appendChild(el("span", "r-n", String(r.n)));
       const t = el("span", "r-text");
       t.appendChild(el("span", "r-title", r.title || r.url));
@@ -577,10 +621,12 @@
       const box = el("div", "sources");
       box.appendChild(el("span", "sources-label", "Sources"));
       shown.forEach((s) => {
-        const a = el("a", "source-chip");
-        a.href = s.url;
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
+        const a = el(isWebUrl(s.url) ? "a" : "span", "source-chip");
+        if (isWebUrl(s.url)) {
+          a.href = s.url;
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+        }
         a.title = s.title + "\n" + s.url;
         a.appendChild(el("span", "s-n", String(s.n)));
         a.appendChild(el("span", "s-domain", domain(s.url)));
@@ -706,10 +752,11 @@
       model: $("#model-select").value || state.settings.model,
       web_search: $("#web-toggle").getAttribute("aria-pressed") === "true",
       think: $("#think-toggle").getAttribute("aria-pressed") === "true",
+      medtech: $("#medtech-toggle").getAttribute("aria-pressed") === "true",
     };
     let finished = false;
     try {
-      const res = await fetch("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: ctrl.signal });
+      const res = await fetch(API + "/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: ctrl.signal });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "HTTP " + res.status);
       await readLines(res, (ev) => {
         if (ev.type === "done") finished = true;
@@ -742,7 +789,7 @@
           history.replaceState(null, "", "#/c/" + ev.chat.id);
         }
         $("#chat-title").textContent = ev.chat.title;
-        document.title = ev.chat.title + " · Local Chat";
+        document.title = ev.chat.title + " · MedScout Ask";
         upsertChatListItem(ev.chat);
         break;
       case "thinking":
@@ -829,7 +876,7 @@
     if (!state.busy) return;
     if (state.chatId) {
       try {
-        await api("/api/chats/" + state.chatId + "/stop", { json: {} });
+        await api(API + "/chats/" + state.chatId + "/stop", { json: {} });
         return;
       } catch (e) { /* fall through to abort */ }
     }
@@ -855,7 +902,7 @@
 
   async function upload(file, item) {
     try {
-      const res = await fetch("/api/upload", {
+      const res = await fetch(API + "/upload", {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream", "X-Filename": encodeURIComponent(item.name) },
         body: file,
@@ -977,6 +1024,12 @@
       syncToggles();
       saveSettings({ web_search: on }).catch(() => {});
     };
+    $("#medtech-toggle").onclick = async (e) => {
+      const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
+      state.settings.medtech = on;
+      syncToggles();
+      saveSettings({ medtech: on }).catch(() => {});
+    };
     $("#think-toggle").onclick = async (e) => {
       const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
       state.settings.think = on;
@@ -1060,6 +1113,7 @@
   }
 
   async function init() {
+    if (window.self !== window.top) document.documentElement.classList.add("embedded");
     let open = !narrow();
     try { if (!narrow() && localStorage.getItem("lc-sidebar") === "0") open = false; } catch (e) { /* ignore */ }
     setSidebar(open);
@@ -1068,7 +1122,7 @@
     try {
       await loadSettings();
     } catch (e) {
-      toast("Can't reach the Local Chat server. Is app.py still running?", 8000);
+      toast("Can't reach the MedScout server. Is `python run.py ui` still running?", 8000);
     }
     syncToggles();
     await Promise.all([refreshStatus(), loadChats().catch(() => {})]);

@@ -2,7 +2,7 @@
 """MedScout command-line entry point.
 
   python run.py demo                                   # fictional case, offline, mock model
-  python run.py run --case nordleaf --provider ollama --model llama3.2:3b
+  python run.py run --case nordleaf --provider ollama --model qwen3.5:9b
   python run.py run --company "Acme Med" --materials path/to/docs --product "AcmeScope" --backend live
   python run.py run --case nordleaf --focus regulatory  # changed request: regulatory claims only
   python run.py resume <run_id>
@@ -10,7 +10,7 @@
   python run.py probe --case nordleaf --claim C1        # one model decision, no tool execution
   python run.py eval                                   # scenarios x systems -> eval/results/
   python run.py test                                   # unit + integration tests (no model needed)
-  python run.py ui                                     # web interface + run controller at http://127.0.0.1:8765
+  python run.py ui                                     # web console (runs, Ask chat, ...) at http://127.0.0.1:8765
 """
 
 from __future__ import annotations

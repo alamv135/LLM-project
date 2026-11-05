@@ -107,11 +107,14 @@ def excerpt(text: str, query: str, max_chars: int) -> Tuple[str, bool]:
     return "".join(pieces)[: max_chars + 200], True
 
 
-def system_prompt(model: str, web_on: bool, has_files: bool, custom: str) -> str:
+def system_prompt(model: str, web_on: bool, has_files: bool, custom: str, medtech_on: bool = False,
+                  medtech_backend: str = "live") -> str:
     today = time.strftime("%A, %d %B %Y")
     lines = [
-        "You are a helpful, knowledgeable assistant running privately on the user's computer "
-        "(model: %s). The current date is %s." % (model, today),
+        "You are MedScout Ask, the free-question area of MedScout, a MedTech investment-diligence assistant. "
+        "You run privately on the user's computer (model: %s). The current date is %s. The user may ask about "
+        "anything; many questions are about medical devices, regulation, clinical evidence, companies and "
+        "markets." % (model, today),
         "",
         "How to answer:",
         "- Be accurate and direct. Lead with the answer, then explain as much as is useful.",
@@ -139,9 +142,23 @@ def system_prompt(model: str, web_on: bool, has_files: bool, custom: str) -> str
     else:
         lines += [
             "",
-            "You have no internet access right now. If a question needs current information, answer from "
-            "what you know, say it may be out of date, and suggest turning on Web search.",
+            "You cannot search the web right now. If a question needs current information, answer from what "
+            "you know, say it may be out of date, and suggest turning on Web search.",
         ]
+    if medtech_on:
+        lines += [
+            "",
+            "MedTech databases: you have tools for openFDA 510(k) clearances (fda_510k_search), PMA approvals "
+            "(fda_pma_search), FDA product classification (fda_classification_lookup), ClinicalTrials.gov "
+            "(clinicaltrials_search) and PubMed (pubmed_search). Prefer them over web search for regulatory "
+            "status, trials and publications, and cite their records by number like other sources.",
+            "- Keep the regulatory words exact: a 510(k) is a clearance, not an approval; \"FDA approved\" for a "
+            "device normally means a PMA; De Novo is a separate pathway.",
+            "- A company's own documents and press releases are company-reported, not independent evidence.",
+        ]
+        if medtech_backend != "live":
+            lines.append("- These tools now read SYNTHETIC demo data for the fictional case '%s'. Say so whenever "
+                         "you use them." % medtech_backend)
     if has_files:
         lines += [
             "",
@@ -166,6 +183,7 @@ class Turn:
         self._source_by_url: Dict[str, int] = {}
         self._part_started = time.time()
         self.notices: List[str] = []
+        self.medtech_on = False          # MedScout's openFDA / trials / PubMed tools for this answer
 
     def emit(self, event: Dict[str, Any]) -> None:
         if self.client_gone:
@@ -209,8 +227,9 @@ class Turn:
 
 
 class ChatService:
-    def __init__(self, settings: Settings, store: ChatStore, files: FileStore):
+    def __init__(self, settings: Settings, store: ChatStore, files: FileStore, medtech: Any = None):
         self.settings = settings
+        self.medtech = medtech            # MedTechTools, or None when MedScout's tools are not available
         self.store = store
         self.files = files
         self._clients: Dict[str, OllamaClient] = {}
@@ -219,7 +238,7 @@ class ChatService:
 
     # ----- Ollama --------------------------------------------------------------------------------
     def client(self) -> OllamaClient:
-        url = self.settings.get("ollama_url")
+        url = self.settings.ollama_url()
         with self._lock:
             if url not in self._clients:
                 self._clients[url] = OllamaClient(url)
@@ -253,6 +272,7 @@ class ChatService:
         retry = bool(req.get("retry"))
         model = str(req.get("model") or self.settings.get("model"))
         web_on = bool(req.get("web_search", self.settings.get("web_search")))
+        turn.medtech_on = self.medtech is not None and bool(req.get("medtech", self.settings.get("medtech")))
         think = bool(req.get("think", self.settings.get("think")))
 
         chat_id = req.get("chat_id")
@@ -361,9 +381,10 @@ class ChatService:
             num_ctx = min(num_ctx, int(info["context_length"]))
         stats["num_ctx"] = num_ctx
 
-        if web_on and caps and "tools" not in caps:
-            turn.notice("%s can't use tools, so web search is off for this answer." % model)
+        if (web_on or turn.medtech_on) and caps and "tools" not in caps:
+            turn.notice("%s can't use tools, so web search and the MedTech databases are off for this answer." % model)
             web_on = False
+            turn.medtech_on = False
         if think and caps and "thinking" not in caps:
             turn.notice("%s has no thinking mode; answering directly." % model)
 
@@ -371,6 +392,8 @@ class ChatService:
         tools: List[Dict[str, Any]] = []
         if web_on:
             tools += [TOOL_WEB_SEARCH, TOOL_FETCH_URL]
+        if turn.medtech_on:
+            tools += self.medtech.tool_defs()
         if partial_files and (not caps or "tools" in caps):   # some file text is not in the prompt
             tools.append(TOOL_SEARCH_FILES)
         question = chat["messages"][-1].get("content", "") if chat["messages"] else ""
@@ -456,6 +479,8 @@ class ChatService:
             part["label"] = "Read %s" % str(args.get("url", "")).strip()
         elif name == "search_files":
             part["label"] = 'Searched your files for "%s"' % str(args.get("query", "")).strip()
+        elif turn.medtech_on and name in self.medtech.names:
+            part["label"] = self.medtech.label(name, args)
         else:
             part["label"] = "Unknown tool %s" % name
         turn.close_part()
@@ -542,6 +567,14 @@ class ChatService:
             part["label"] = 'Searched your files for "%s" (%d passages)' % (query, len(out))
             return "\n\n---\n\n".join(out)
 
+        if turn.medtech_on and name in self.medtech.names:
+            text, results, error = self.medtech.run(name, args, self.settings.get("medtech_backend"), turn.add_source)
+            part["results"] = results
+            if error:
+                part["ok"] = False
+                part["error"] = error
+            return text
+
         raise web.WebError("Unknown tool %s" % name)
 
     # ----- prompt ------------------------------------------------------------------------------
@@ -551,10 +584,11 @@ class ChatService:
         msgs = [m for m in chat["messages"] if not (m["role"] == "assistant" and not m.get("content"))]
         file_ids = [a["id"] for m in msgs if m["role"] == "user" for a in m.get("attachments", [])
                     if a.get("kind") == "text"]
-        system = system_prompt(model, web_on, bool(file_ids), self.settings.get("custom_instructions") or "")
+        system = system_prompt(model, web_on, bool(file_ids), self.settings.get("custom_instructions") or "",
+                               turn.medtech_on, self.settings.get("medtech_backend"))
         vision = "vision" in caps
         reply_reserve = min(num_ctx // 4, 6000 if think else 2500)
-        tool_reserve = min(num_ctx // 4, 7000) if web_on else (min(num_ctx // 6, 3000) if file_ids else 0)
+        tool_reserve = min(num_ctx // 4, 7000) if (web_on or turn.medtech_on) else (min(num_ctx // 6, 3000) if file_ids else 0)
         budget = num_ctx - reply_reserve - tool_reserve - estimate_tokens(system) - 300
         partial: List[str] = []
         out: List[Dict[str, Any]] = []

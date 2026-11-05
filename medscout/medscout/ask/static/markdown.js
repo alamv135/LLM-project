@@ -129,7 +129,7 @@
       const text = node.nodeValue;
       text.replace(/\[(\d{1,3}(?:\s*,\s*\d{1,3})*)\]/g, function (m, list, offset) {
         const nums = list.split(",").map((x) => +x.trim());
-        if (!nums.every((n) => byN[n])) return m;
+        if (!nums.every((n) => byN[n] && /^https?:\/\//i.test(byN[n].url || ""))) return m;
         frag.appendChild(document.createTextNode(text.slice(last, offset)));
         nums.forEach(function (n) {
           const a = document.createElement("a");

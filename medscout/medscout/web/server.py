@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from ..ask.routes import AskApp
 from ..config import ROOT, Limits, Settings
 from ..control import FLAGS, RunController
 from ..llm import LLMError, make_llm
@@ -182,6 +183,7 @@ class App:
         self.lock = threading.Lock()
         self.eval_job: dict[str, Any] | None = None
         self.connection: dict[str, str] = {k: os.environ.get(v, "") for k, v in CONNECTION_ENV.items()}
+        self.ask = AskApp(base)            # the "Ask" tab: free chat with the local model
 
     # -------------------------------------------------------------- busy state
     def busy(self) -> str:
@@ -547,6 +549,14 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "JSON body must be an object")
         return obj
 
+    def _host_ok(self) -> bool:
+        """When serving this computer only, accept only requests addressed to it (blocks DNS rebinding)."""
+        bound = self.server.server_address[0]
+        if bound not in ("127.0.0.1", "localhost", "::1"):
+            return True
+        port = self.server.server_address[1]
+        return (self.headers.get("Host") or "").lower() in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+
     def _same_origin(self) -> None:
         origin = self.headers.get("Origin")
         if origin and urllib.parse.urlparse(origin).netloc != self.headers.get("Host"):
@@ -556,8 +566,12 @@ class Handler(BaseHTTPRequestHandler):
         url = urllib.parse.urlparse(self.path)
         path, q = url.path, urllib.parse.parse_qs(url.query)
         try:
+            if not self._host_ok():
+                raise ApiError(403, "Open the console at http://127.0.0.1:<port>/")
             if method != "GET":
                 self._same_origin()
+            if self.app.ask.handles(path):
+                return self.app.ask.dispatch(self, method, path)
             if not path.startswith("/api/"):
                 return self._static(path)
             self._api(method, path, q)
@@ -574,6 +588,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         self._dispatch("PUT")
+
+    def do_DELETE(self):
+        self._dispatch("DELETE")
 
     def _static(self, path: str) -> None:
         name = "index.html" if path in ("/", "/index.html") else path.lstrip("/")

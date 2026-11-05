@@ -1,6 +1,8 @@
-"""A fake Ollama server for tests and demos (no real model needed).
+"""A fake Ollama server for the Ask tests and demos (no real model needed).
 
-It speaks the parts of the Ollama API that Local Chat uses and answers with scripted text:
+It speaks the parts of the Ollama API that MedScout Ask uses and answers with scripted text:
+  * "fda" (with the MedTech tools on)          -> calls fda_510k_search for Nordleaf, answers citing [1]
+  * "bad k number"                             -> calls fda_510k_search with an invalid K-number
   * a message containing "search" or "latest"  -> calls web_search, then answers citing [1] [2]
   * a message containing a URL                 -> calls fetch_url on it
   * "slow"                                     -> streams slowly (for testing Stop)
@@ -150,12 +152,20 @@ class FakeOllama(BaseHTTPRequestHandler):
             nums = re.findall(r"^\[(\d+)\]", tool_text, re.M)
             if "Tool error" in tool_text:
                 say("I could not get that information: the tool failed.")
+            elif nums and last.get("tool_name") != "web_search":
+                say("The records show a 510(k) clearance [%s], which is not a PMA approval." % nums[0])
             elif nums:
                 say("According to the results, Ollama 0.12 adds web search [%s]. " % nums[0])
                 if len(nums) > 1:
                     say("Qwen3.5 small models support tools and vision [%s]." % nums[1])
             else:
                 say("Here is what I found: " + tool_text[:80])
+        elif "bad k number" in text.lower() and "fda_510k_search" in tools:
+            out.append({"message": {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "fda_510k_search", "arguments": {"k_number": "123"}}}]}, "done": False})
+        elif "fda" in text.lower() and "fda_510k_search" in tools:
+            out.append({"message": {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "fda_510k_search", "arguments": {"applicant": "Nordleaf Cardio"}}}]}, "done": False})
         elif url and "fetch_url" in tools:
             out.append({"message": {"role": "assistant", "content": "", "tool_calls": [
                 {"function": {"name": "fetch_url", "arguments": {"url": url.group(0)}}}]}, "done": False})
