@@ -160,12 +160,32 @@ def port_from_args(args: list[str]) -> int:
     return PORT
 
 
-def console_running(port: int) -> bool:
+def running_copy(port: int) -> str | None:
+    """None = nothing (or not MedScout) on this port; else the folder of the MedScout copy serving it
+    ("" = an older version that does not say)."""
     try:
         with urllib.request.urlopen("http://127.0.0.1:%d/api/config" % port, timeout=2) as r:
-            return "runs_dir" in json.loads(r.read().decode("utf-8"))
+            cfg = json.loads(r.read().decode("utf-8"))
     except Exception:  # noqa: BLE001
+        return None
+    return str(cfg.get("app_root", "")) if "runs_dir" in cfg else None
+
+
+def same_folder(a: str, b: Path) -> bool:
+    try:
+        return bool(a) and Path(a).resolve() == b.resolve()
+    except OSError:
         return False
+
+
+def port_free(port: int) -> bool:
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
 
 
 def main() -> None:
@@ -178,10 +198,24 @@ def main() -> None:
 
     port = port_from_args(args)
     url = "http://127.0.0.1:%d/" % port
-    if console_running(port):
+    other = running_copy(port)
+    if other is not None and same_folder(other, HERE):
         say("MedScout is already running: " + url)
         webbrowser.open(url)
         return
+    if other is not None or not port_free(port):
+        say("\n[!] Port %d is used by %s." % (port, ("another copy of MedScout (%s)" % other) if other else
+            "an OLDER MedScout or another program"))
+        say("    Close that window (or the VS Code terminal running it) to stop it. On Windows you can also\n"
+            "    end 'python.exe' in Task Manager. This version starts on another port instead.")
+        new = next((p for p in range(port + 1, port + 30) if port_free(p) and running_copy(p) is None), None)
+        if new is None:
+            stop("No free port found near %d." % port)
+        if "--port" in args:
+            args[args.index("--port") + 1] = str(new)
+        else:
+            args += ["--port", str(new)]
+        port, url = new, "http://127.0.0.1:%d/" % new
     start_ollama()
     say("\nStarting MedScout at %s  (your browser opens in a moment)" % url)
     say("Keep this window open while you work. To stop: press Ctrl+C or close the window.\n")

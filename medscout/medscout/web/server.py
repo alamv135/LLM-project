@@ -220,6 +220,7 @@ class App:
                        for m in self.ask.router.reg.all()],
             "database": bool(user_settings.load(self.base.runs_dir)["database_path"]),
             "runs_dir": str(self.base.runs_dir),
+            "app_root": str(ROOT),            # which copy of MedScout this server runs (launch.py checks it)
         }
 
     def connection_view(self) -> dict[str, Any]:
