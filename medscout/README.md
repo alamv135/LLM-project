@@ -17,8 +17,24 @@ Members: Fung Chin Chun (u3665702) · Tsoi Wai Chit Alvin (u3666009) · Lam Leun
 
 ## Quickstart
 
+### Easiest: double-click
+
+1. Install **Python 3.10 or newer** from <https://www.python.org/downloads/> (Windows: tick
+   **"Add python.exe to PATH"** in the installer) and **Ollama** from <https://ollama.com/download>.
+2. Open the `medscout` folder and double-click **`Start MedScout.bat`** (Windows) or
+   **`Start MedScout.command`** (Mac; the first time: right-click → Open).
+
+The first start creates a private Python environment (`.venv`) and installs the packages (about a
+minute). Every start then starts Ollama if needed and opens <http://127.0.0.1:8765>. Keep the black
+window open while you work; close it to stop. Then download a model once: `ollama pull qwen3.5:9b`.
+
+Same thing from a terminal, inside the `medscout` folder: `python launch.py`.
+In PowerShell, put paths with spaces or brackets in quotes, e.g. `cd "C:\Users\you\Downloads\LLM-project (1)\medscout"`.
+
+### By hand
+
 ```bash
-python3 -m venv .venv && . .venv/bin/activate      # Python 3.10+ (tested on 3.13)
+python3 -m venv .venv && . .venv/bin/activate      # Python 3.10+ (tested on 3.13 and 3.14)
 pip install -r requirements.txt
 ```
 

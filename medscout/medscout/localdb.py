@@ -16,7 +16,6 @@ import re
 import sqlite3
 import threading
 import time
-import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +37,7 @@ class LocalDB:
         self.timeout_s = timeout_s
         self._lock = threading.Lock()
         self._deadline = 0.0
-        uri = "file:" + urllib.parse.quote(str(self.path)) + "?mode=ro"
+        uri = self.path.as_uri() + "?mode=ro"          # file:///C:/... on Windows, file:///home/... elsewhere
         try:
             self.conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
             self.conn.execute("PRAGMA query_only = ON")

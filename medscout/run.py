@@ -18,9 +18,28 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
+
+if sys.version_info < (3, 10):
+    sys.exit("MedScout needs Python 3.10 or newer (you have %s). Get it from https://www.python.org/downloads/"
+             % sys.version.split()[0])
+
+if not sys.flags.utf8_mode and os.environ.get("PYTHONUTF8") != "1":
+    # Windows (e.g. a Chinese locale) would read MedScout's UTF-8 text files with the wrong encoding.
+    # Run again in Python's UTF-8 mode; same arguments, same exit code.
+    sys.exit(subprocess.call([sys.executable, "-X", "utf8", __file__] + sys.argv[1:]))
+
+try:
+    import jsonschema  # noqa: F401  (needed by MedScout; checked here for a clear message)
+except ImportError:
+    sys.exit("MedScout's packages are not installed for this Python (%s).\n"
+             "Easiest: double-click 'Start MedScout.bat' (Windows) or 'Start MedScout.command' (Mac),\n"
+             "or run:  python launch.py\n"
+             "Or install them yourself:  python -m pip install -r requirements.txt" % sys.executable)
 
 from medscout.config import ROOT, Settings
 from medscout.state import RunState
