@@ -24,6 +24,7 @@
     x: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>',
     pencil: '<svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>',
     trash: '<svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
+    db: '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>',
     flask: '<svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.7 3h10.6a2 2 0 0 0 1.7-3l-5-9V3"/><path d="M7.5 15h9"/></svg>',
     warn: '<svg viewBox="0 0 24 24"><path d="M12 3 2 20h20zM12 10v4M12 17h.01"/></svg>',
   };
@@ -121,19 +122,34 @@
     const sel = $("#model-select");
     const current = state.settings.model || s.model;
     sel.innerHTML = "";
-    const names = (s.models || []).map((m) => m.name);
-    (s.models || []).forEach((m) => {
-      const o = el("option", null, m.name + (m.parameter_size ? "  ·  " + m.parameter_size : ""));
-      o.value = m.name;
-      sel.appendChild(o);
+    const auto = el("option", null, "Auto: local first, API only when needed");
+    auto.value = "auto";
+    sel.appendChild(auto);
+    const catalog = s.catalog || [];
+    [["Local (free, private)", catalog.filter((m) => m.local)], ["API via OpenRouter (paid)", catalog.filter((m) => !m.local)]].forEach(([label, list]) => {
+      if (!list.length) return;
+      const g = document.createElement("optgroup");
+      g.label = label;
+      list.forEach((m) => {
+        const o = el("option", null, m.label + (m.local ? "" : "  ·  $" + Number(m.price_out).toFixed(2) + "/M out") + (m.available ? "" : "  (" + (m.local ? "not downloaded" : "no key") + ")"));
+        o.value = m.alias;
+        g.appendChild(o);
+      });
+      sel.appendChild(g);
     });
-    if (current && !names.includes(current) && !names.includes(current + ":latest")) {
-      const o = el("option", null, current + (s.ollama ? " (not downloaded)" : ""));
+    if (current && current !== "auto" && !catalog.some((m) => m.alias === current)) {
+      const o = el("option", null, current);
       o.value = current;
       sel.appendChild(o);
     }
-    sel.value = names.includes(current) ? current : names.includes(current + ":latest") ? current + ":latest" : current;
-    $("#welcome-sub").textContent = "Ask anything. " + (current || "Your model") + " runs on your Mac and can check the web, FDA, ClinicalTrials.gov and PubMed.";
+    sel.value = current;
+    state.currentModel = catalog.find((m) => m.alias === current) || null;
+    $("#welcome-sub").textContent = current === "auto"
+      ? "Ask anything. Easy questions stay on your Mac; harder ones may use an API model (your files stay local)."
+      : "Ask anything. " + ((state.currentModel && state.currentModel.label) || current) + " answers; it can check the web, FDA, ClinicalTrials.gov and PubMed.";
+    $("#db-toggle").hidden = !(s.database && s.database.connected);
+    $("#db-toggle").title = s.database && s.database.connected ? "Let the model read your database " + s.database.name + " (read-only)" : "";
+    syncPrivate();
 
     const caps = s.capabilities || [];
     const hasCaps = caps.length > 0;
@@ -159,18 +175,25 @@
       const b = el("button", "btn small", "Try again");
       b.onclick = refreshStatus;
       banner.appendChild(b);
+    } else if (s.key_missing) {
+      banner.hidden = false;
+      banner.className = "banner";
+      banner.innerHTML = ICON.warn + "<div><b></b> needs an OpenRouter API key. Add it in the console's <b>Model connection</b> tab, or pick a local model or Auto.</div>";
+      banner.querySelector("div b").textContent = (state.currentModel && state.currentModel.label) || current;
     } else if (!s.model_installed) {
+      const pull = s.download_model || current;
       banner.hidden = false;
       banner.className = "banner";
       const text = el("div");
-      text.innerHTML = "<b></b> is not downloaded yet. It is a one-time download" + (/^qwen3\.5:9b$/.test(current) ? " of about 6.6 GB." : ".");
-      text.querySelector("b").textContent = current;
+      text.innerHTML = "<b></b> is not downloaded yet" + (current === "auto" ? " (Auto uses it for easy questions and to rate questions)" : "") +
+        ". It is a one-time download" + (/^qwen3\.5:9b$/.test(pull) ? " of about 6.6 GB." : ".");
+      text.querySelector("b").textContent = pull;
       const bar = el("div", "progress");
       bar.hidden = true;
       bar.appendChild(el("span"));
       text.appendChild(bar);
       const b = el("button", "btn small primary", "Download");
-      b.onclick = () => pullModel(current, b, bar, text);
+      b.onclick = () => pullModel(pull, b, bar, text);
       banner.appendChild(document.createRange().createContextualFragment(ICON.warn));
       banner.appendChild(text);
       banner.appendChild(b);
@@ -216,10 +239,29 @@
     applyTheme(state.settings.theme);
   }
 
+  function chatIsPrivate() {
+    const msgs = (state.chat && state.chat.messages) || [];
+    return state.pending.length > 0 || msgs.some((m) => (m.role === "user" && m.attachments && m.attachments.length) ||
+      (m.parts || []).some((p) => p.type === "tool" && /^db_/.test(p.name || ""))) ||
+      $("#db-toggle").getAttribute("aria-pressed") === "true";
+  }
+  function allowCloud() {
+    return state.chat ? !!state.chat.allow_cloud : !!state.allowCloudNew;
+  }
+  function syncPrivate() {
+    const p = $("#private-toggle");
+    const cloudPossible = (state.settings.model || "auto") === "auto" || (state.currentModel && !state.currentModel.local);
+    p.hidden = !(cloudPossible && chatIsPrivate());
+    const local = !allowCloud();
+    p.setAttribute("aria-pressed", String(local));
+    p.querySelector("span").textContent = local ? "Files stay local" : "Cloud may read files";
+  }
+
   function syncToggles() {
     const web = $("#web-toggle");
     const think = $("#think-toggle");
     web.setAttribute("aria-pressed", String(!!state.settings.web_search && !web.disabled));
+    $("#db-toggle").setAttribute("aria-pressed", String(!!state.dbOn));
     const med = $("#medtech-toggle");
     med.setAttribute("aria-pressed", String(!!state.settings.medtech && !med.disabled));
     const demo = state.settings.medtech_backend && state.settings.medtech_backend !== "live";
@@ -253,6 +295,7 @@
       .forEach(([v, l]) => { const o = el("option", null, l); o.value = v; mb.appendChild(o); });
     mb.value = s.medtech_backend || "live";
     f.elements.temperature.value = s.temperature == null ? "" : s.temperature;
+    f.elements.max_cost_per_answer.value = s.max_cost_per_answer == null ? 0.1 : s.max_cost_per_answer;
     f.elements.search_backend.value = s.search_backend;
     f.elements.ollama_api_key.value = "";
     f.elements.ollama_api_key_clear.checked = false;
@@ -278,6 +321,7 @@
       medtech_backend: f.medtech_backend.value,
       num_ctx: +f.num_ctx.value,
       temperature: f.temperature.value === "" ? null : +f.temperature.value,
+      max_cost_per_answer: f.max_cost_per_answer.value === "" ? 0 : +f.max_cost_per_answer.value,
       search_backend: f.search_backend.value,
       max_tool_rounds: +f.max_tool_rounds.value || 6,
       custom_instructions: f.custom_instructions.value,
@@ -396,6 +440,9 @@
     if (state.busy) stopGenerating();
     state.chatId = null;
     state.chat = null;
+    state.allowCloudNew = false;
+    state.dbOn = false;
+    syncToggles();
     if (location.hash) history.pushState(null, "", location.pathname);
     renderChat();
     renderChatList();
@@ -412,9 +459,12 @@
       toast("Chat not found");
       return newChat();
     }
+    state.dbOn = (state.chat.messages || []).some((m) => (m.parts || []).some((p) => p.type === "tool" && /^db_/.test(p.name || "")));
+    syncToggles();
     renderChat();
     renderChatList();
     closeSidebarIfOverlay();
+    syncPrivate();
     state.stickBottom = true;
     scrollToBottom(true);
     // pictures and math fonts load a moment later and make the page taller
@@ -565,7 +615,7 @@
     node.classList.toggle("failed", p.ok === false);
     const head = el("button", "tool-head");
     head.type = "button";
-    const icon = p.name === "web_search" ? ICON.globe : p.name === "fetch_url" ? ICON.page : p.name === "search_files" ? ICON.filesearch : ICON.flask;
+    const icon = p.name === "web_search" ? ICON.globe : p.name === "fetch_url" ? ICON.page : p.name === "search_files" ? ICON.filesearch : /^db_/.test(p.name) ? ICON.db : ICON.flask;
     head.innerHTML = '<span class="tool-icon">' + icon + '</span><span class="tool-label"></span><span class="tool-count"></span>' + ICON.chevron;
     let label = p.label || p.name;
     if (p.pending) label = label.replace(/^Searched/, "Searching").replace(/^Read /, "Reading ") + "…";
@@ -602,9 +652,21 @@
     node.appendChild(list);
   }
 
+  function strongerExists(tier) {
+    return ((state.status && state.status.catalog) || []).some((c) => c.tier > (tier || 0) && c.available);
+  }
+
+  function routeLine(r) {
+    const d = el("div", "route-line");
+    d.textContent = "→ " + r.label + (r.local && !/local/i.test(r.label) ? " (local)" : "") + " · " + r.reason;
+    d.title = (r.skipped || []).join("\n");
+    return d;
+  }
+
   function finishView(view, m, isLast) {
     const { body } = view;
-    body.querySelectorAll(".a-foot, .notice, .error-box, .sources").forEach((n) => n.remove());
+    body.querySelectorAll(".a-foot, .notice, .error-box, .sources, .route-line").forEach((n) => n.remove());
+    if (m.route && m.route.reason && m.route.reason !== "chosen by you") body.insertBefore(routeLine(m.route), view.partsBox);
     (m.notices || []).forEach((n) => body.appendChild(el("div", "notice", n)));
     if (m.error) {
       const box = el("div", "error-box");
@@ -647,11 +709,19 @@
       retry.onclick = () => send({ retry: true });
       foot.appendChild(retry);
     }
+    if (isLast && m.route && m.route.model && !m.error && strongerExists(m.route.tier) && !(chatIsPrivate() && !allowCloud())) {
+      const up = el("button", "btn small stronger", "Try a stronger model");
+      up.title = "Answer again with a more capable (API) model. Costs tokens.";
+      up.onclick = () => send({ retry: true, escalate_from: m.route.model });
+      foot.appendChild(up);
+    }
     const st = m.stats || {};
-    const bits = [m.model];
+    const bits = [m.model_label || m.model];
+    if (st.cost_usd) bits.push("$" + st.cost_usd.toFixed(4));
+    else if (m.route && m.route.local) bits.push("free");
     if (m.stopped) bits.push("stopped");
     if (st.tokens) bits.push(st.tokens.toLocaleString() + " tokens");
-    if (st.tokens_per_s) bits.push(st.tokens_per_s + " tok/s");
+    if (st.tokens_per_s && !(m.route && m.route.local === false)) bits.push(st.tokens_per_s + " tok/s");
     if (st.seconds != null) bits.push(st.seconds + " s");
     const stats = el("span", "stats", bits.filter(Boolean).join(" · "));
     if (st.context_used && st.num_ctx) stats.title = "Context used: " + st.context_used.toLocaleString() + " of " + st.num_ctx.toLocaleString() + " tokens";
@@ -724,7 +794,7 @@
       renderPending();
     }
     // the previous answer is no longer the last one: hide its retry button
-    box.querySelectorAll(".msg.assistant .a-foot .icon-btn:nth-child(2)").forEach((b) => b.remove());
+    box.querySelectorAll(".msg.assistant .a-foot .icon-btn:nth-child(2), .msg.assistant .a-foot .stronger").forEach((b) => b.remove());
 
     const live = { message: { role: "assistant", parts: [], sources: [], content: "" }, view: null };
     live.view = { root: el("div", "msg assistant streaming"), partEls: [] };
@@ -753,6 +823,9 @@
       web_search: $("#web-toggle").getAttribute("aria-pressed") === "true",
       think: $("#think-toggle").getAttribute("aria-pressed") === "true",
       medtech: $("#medtech-toggle").getAttribute("aria-pressed") === "true",
+      database: $("#db-toggle").getAttribute("aria-pressed") === "true" && !$("#db-toggle").hidden,
+      allow_cloud: allowCloud(),
+      escalate_from: opts.escalate_from || "",
     };
     let finished = false;
     try {
@@ -784,7 +857,7 @@
       case "chat":
         if (state.chatId !== ev.chat.id) {
           state.chatId = ev.chat.id;
-          state.chat = { id: ev.chat.id, title: ev.chat.title, messages: state.firstMessage ? [state.firstMessage] : [] };
+          state.chat = { id: ev.chat.id, title: ev.chat.title, messages: state.firstMessage ? [state.firstMessage] : [], allow_cloud: !!state.allowCloudNew };
           state.firstMessage = null;
           history.replaceState(null, "", "#/c/" + ev.chat.id);
         }
@@ -823,6 +896,9 @@
       }
       case "notice":
         live.view.body.insertBefore(el("div", "notice", ev.text), live.view.partsBox);
+        break;
+      case "route":
+        if (ev.reason !== "chosen by you") live.view.body.insertBefore(routeLine(ev), live.view.partsBox);
         break;
       case "context":
         live.view.body.insertBefore(el("div", "notice", "Some older messages were left out so the conversation fits in the model's context window."), live.view.partsBox);
@@ -919,6 +995,7 @@
   }
 
   function renderPending() {
+    syncPrivate();
     const box = $("#attachments");
     box.innerHTML = "";
     box.hidden = state.pending.length === 0;
@@ -1023,6 +1100,19 @@
       state.settings.web_search = on;
       syncToggles();
       saveSettings({ web_search: on }).catch(() => {});
+    };
+    $("#db-toggle").onclick = async (e) => {
+      const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
+      state.dbOn = on;            // per chat: database data is private, so it is not switched on everywhere
+      syncToggles();
+      syncPrivate();
+    };
+    $("#private-toggle").onclick = (e) => {
+      const local = e.currentTarget.getAttribute("aria-pressed") === "true";
+      if (local && !confirm("Allow cloud (API) models to read the files and database data in this chat? They leave your computer.")) return;
+      if (state.chat) state.chat.allow_cloud = local;
+      else state.allowCloudNew = local;
+      syncPrivate();
     };
     $("#medtech-toggle").onclick = async (e) => {
       const on = e.currentTarget.getAttribute("aria-pressed") !== "true";

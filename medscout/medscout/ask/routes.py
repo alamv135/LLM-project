@@ -25,7 +25,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import unquote
 
+from .. import user_settings
 from ..config import Settings as MedScoutSettings
+from ..localdb import DatabaseError
+from ..models import shared_router
 from .chat import ChatService
 from .config import CONTEXT_CHOICES, STATIC_DIR, Settings
 from .files import MAX_UPLOAD, FileStore, UploadError
@@ -49,9 +52,16 @@ class AskApp:
         self.files = FileStore(data_dir)
         self.files.cleanup_orphans()
         self.medtech = MedTechTools(base)
-        self.chats = ChatService(self.settings, self.store, self.files, self.medtech)
+        self.chats = ChatService(self.settings, self.store, self.files, self.medtech, router=None,
+                                 database=lambda: user_settings.open_database(base.runs_dir),
+                                 database_notes=lambda: user_settings.load(base.runs_dir)["database_notes"])
+        self.chats.router = self.router
         self.pull_lock = threading.Lock()
         self.pull_cancel: Optional[CancelToken] = None
+
+    @property
+    def router(self):
+        return shared_router(self.base)       # reloads when config/models.json changes
 
     # ----- data --------------------------------------------------------------------------------------
     def status(self) -> Dict[str, Any]:
@@ -70,11 +80,50 @@ class AskApp:
             out["ollama_error"] = str(exc)
             out["models"] = []
         names = {m["name"] for m in out["models"]}
-        out["model_installed"] = model in names or (model + ":latest") in names
-        if out["model_installed"]:
-            info = self.chats.capabilities(model)
-            out["capabilities"] = info.get("capabilities", [])
-            out["max_context"] = info.get("context_length", 0)
+        reg = self.router.reg
+        if out["ollama"]:
+            reg.refresh_local()
+        catalog = []
+        for m in reg.all():
+            ok, why = reg.available(m)
+            catalog.append({"alias": m.alias, "label": m.label, "local": m.local, "tier": m.tier, "id": m.id,
+                            "price_in": m.price_in, "price_out": m.price_out, "available": ok, "why": why})
+        known = {m.id for m in reg.all()}
+        for n in sorted(names - known):
+            catalog.append({"alias": n, "label": n, "local": True, "tier": 0, "id": n, "price_in": 0, "price_out": 0,
+                            "available": True, "why": ""})
+        out["catalog"] = catalog
+        if model == "auto":
+            cls = reg.get(reg.router_cfg.get("classifier", "qwen-local"))
+            out["download_model"] = cls.id
+            out["model_installed"] = cls.id in names or (cls.id + ":latest") in names
+            out["capabilities"] = ["tools", "vision", "thinking"]
+        else:
+            try:
+                m = reg.get(model)
+            except KeyError as exc:
+                out["model_error"] = str(exc)
+                return out
+            out["download_model"] = m.id
+            if m.local:
+                out["model_installed"] = m.id in names or (m.id + ":latest") in names
+                if out["model_installed"]:
+                    info = self.chats.capabilities(m.id)
+                    out["capabilities"] = info.get("capabilities", [])
+                    out["max_context"] = info.get("context_length", 0)
+            else:
+                out["cloud"] = True
+                out["model_installed"] = True
+                out["key_missing"] = not reg.available(m)[0]
+                out["capabilities"] = [c for c, ok in (("tools", m.tools), ("vision", m.vision),
+                                                       ("thinking", m.thinking)) if ok]
+        try:
+            db = user_settings.open_database(self.base.runs_dir)
+            out["database"] = {"connected": db is not None, "name": db.name if db else ""}
+            if db:
+                db.close()
+        except DatabaseError as exc:
+            out["database"] = {"connected": False, "error": str(exc)}
         return out
 
     def attach_run(self, run_id: str) -> Dict[str, Any]:

@@ -24,6 +24,8 @@ from typing import Any, Dict, List
 MODELS = {
     "qwen3.5:9b": {"capabilities": ["completion", "tools", "vision", "thinking"], "ctx": 262144,
                    "family": "qwen35", "size": "9.7B"},
+    "gemma4:e4b": {"capabilities": ["completion", "tools", "vision", "thinking"], "ctx": 131072,
+                   "family": "gemma4", "size": "8B"},
     "llama3.2:3b": {"capabilities": ["completion", "tools"], "ctx": 131072, "family": "llama", "size": "3.2B"},
     "tiny:1b": {"capabilities": ["completion"], "ctx": 4096, "family": "tiny", "size": "1B"},
 }
@@ -48,6 +50,14 @@ ARTICLE = """<!DOCTYPE html><html><head><title>Ollama 0.12 release notes</title>
 <p>This release adds a <b>web search</b> API and loads models 30% faster.</p>
 <p>It also improves tool calling for Qwen models.</p></article></main>
 <footer>Copyright 2026</footer><script>var tracking = 1;</script></body></html>"""
+
+
+class QuietServer(ThreadingHTTPServer):
+    """Clients closing kept-alive connections are normal here; do not print them."""
+    def handle_error(self, request, client_address):  # noqa: ANN001
+        import sys
+        if not isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
+            super().handle_error(request, client_address)
 
 
 class FakeOllama(BaseHTTPRequestHandler):
@@ -110,6 +120,8 @@ class FakeOllama(BaseHTTPRequestHandler):
                 return self._json({"error": "model '%s' not found" % body.get("model")}, 404)
             if body.get("tools") and "tools" not in MODELS[body["model"]]["capabilities"]:
                 return self._json({"error": "registry.ollama.ai/library/x does not support tools"}, 400)
+            if body.get("stream") is False:
+                return self._json(self._single(body))
             return self._stream(self._script(body))
         return self._json({"error": "not found"}, 404)
 
@@ -128,6 +140,20 @@ class FakeOllama(BaseHTTPRequestHandler):
             self.wfile.write(b"0\r\n\r\n")
         except (BrokenPipeError, ConnectionResetError):
             FakeOllama.requests.append({"_client_disconnected": True})
+
+    def _single(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Non-streamed answers: the router's question classifier, or MedScout's research steps."""
+        msgs = body.get("messages") or []
+        system = msgs[0].get("content", "") if msgs else ""
+        if "how capable an AI model must be" in system:
+            q = msgs[-1].get("content", "").lower()
+            level = "expert" if "expert" in q else "hard" if ("compare" in q or "analy" in q) else "medium"
+            text = json.dumps({"difficulty": level, "reason": "fake rating"})
+        else:
+            from medscout import mock_policy
+            text = mock_policy.respond(msgs)
+        return {"message": {"role": "assistant", "content": text}, "done": True,
+                "prompt_eval_count": 100, "eval_count": 20}
 
     # ----- the scripted "model" ------------------------------------------------------------------
     def _script(self, body: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -152,6 +178,10 @@ class FakeOllama(BaseHTTPRequestHandler):
             nums = re.findall(r"^\[(\d+)\]", tool_text, re.M)
             if "Tool error" in tool_text:
                 say("I could not get that information: the tool failed.")
+            elif last.get("tool_name", "").startswith("db_"):
+                row = re.search(r"^\| (\d+) \|$", tool_text, re.M)
+                say("Your database has %s deals [%s]." % (row.group(1) if row else "some", nums[0] if nums else "1")
+                    if "Database error" not in tool_text else "The database refused that: " + tool_text[:120])
             elif nums and last.get("tool_name") != "web_search":
                 say("The records show a 510(k) clearance [%s], which is not a PMA approval." % nums[0])
             elif nums:
@@ -160,6 +190,12 @@ class FakeOllama(BaseHTTPRequestHandler):
                     say("Qwen3.5 small models support tools and vision [%s]." % nums[1])
             else:
                 say("Here is what I found: " + tool_text[:80])
+        elif "how many deals" in text.lower() and "db_query" in tools:
+            out.append({"message": {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "db_query", "arguments": {"sql": "SELECT count(*) AS n FROM deals"}}}]}, "done": False})
+        elif "drop the deals" in text.lower() and "db_query" in tools:
+            out.append({"message": {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "db_query", "arguments": {"sql": "DROP TABLE deals"}}}]}, "done": False})
         elif "bad k number" in text.lower() and "fda_510k_search" in tools:
             out.append({"message": {"role": "assistant", "content": "", "tool_calls": [
                 {"function": {"name": "fda_510k_search", "arguments": {"k_number": "123"}}}]}, "done": False})
@@ -194,7 +230,7 @@ class FakeOllama(BaseHTTPRequestHandler):
 
 
 def start(port: int = 0) -> ThreadingHTTPServer:
-    server = ThreadingHTTPServer(("127.0.0.1", port), FakeOllama)
+    server = QuietServer(("127.0.0.1", port), FakeOllama)
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server

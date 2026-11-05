@@ -83,6 +83,14 @@
               <svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.7 3h10.6a2 2 0 0 0 1.7-3l-5-9V3"/><path d="M7.5 15h9"/></svg>
               <span>FDA &amp; trials</span>
             </button>
+            <button type="button" id="db-toggle" class="pill" aria-pressed="false" hidden title="Let the model read your SQLite database (read-only)">
+              <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+              <span>Database</span>
+            </button>
+            <button type="button" id="private-toggle" class="pill" aria-pressed="true" hidden title="On: your files and database data in this chat only go to local models. Off: cloud models may read them.">
+              <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+              <span>Files stay local</span>
+            </button>
             <span class="spacer"></span>
             <button type="submit" id="send-btn" class="send" title="Send (Enter)" aria-label="Send">
               <svg class="i-send" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
@@ -117,6 +125,10 @@
         <label>Context window
           <select name="num_ctx"></select>
           <small>How much text the model can look at at once (your chat, files, web pages). Bigger needs more memory and is slower. 32K is a good start on a 16 GB Mac.</small>
+        </label>
+        <label>Cost limit per answer (USD)
+          <input name="max_cost_per_answer" type="number" min="0" max="100" step="0.01">
+          <small>The most one answer may spend on API models. Auto switches to a local model before passing it; a single API model stops. 0 = no limit.</small>
         </label>
         <label>Temperature
           <input name="temperature" type="number" min="0" max="2" step="0.1" placeholder="Model default">

@@ -36,6 +36,8 @@ class ToolContext:
     evidence: dict[str, Any] = field(default_factory=dict)   # evidence store (read-only for tools)
     skills: Any = None                 # SkillLibrary
     cache: Any = None                  # memory.Memory (HTTP cache)
+    database: Any = None               # localdb.LocalDB when the user's database is connected
+    database_notes: str = ""           # what the user says is in it
     timeout_s: float = 10.0
 
 

@@ -15,6 +15,9 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ..llm import LLMError
+from ..localdb import DatabaseError, as_markdown, schema_text
+from ..models.router import BudgetExceeded, Needs
 from . import web
 from .config import Settings
 from .files import FileStore, UploadError, bm25_rank, chunk_text
@@ -69,6 +72,25 @@ TOOL_SEARCH_FILES = {
     },
 }
 
+TOOL_DB = [
+    {"type": "function", "function": {
+        "name": "db_list_tables",
+        "description": "List the tables in the user's own SQLite database with row counts and columns.",
+        "parameters": {"type": "object", "properties": {}, "required": []}}},
+    {"type": "function", "function": {
+        "name": "db_describe_table",
+        "description": "Columns, keys and 3 sample rows of one table in the user's database. Use before querying.",
+        "parameters": {"type": "object", "properties": {"table": {"type": "string", "description": "Table name"}},
+                       "required": ["table"]}}},
+    {"type": "function", "function": {
+        "name": "db_query",
+        "description": "Run ONE read-only SQLite SELECT on the user's database and get the rows (max 200; "
+                       "50 shown). Use WHERE, GROUP BY, ORDER BY and LIMIT to get exactly what is needed.",
+        "parameters": {"type": "object", "properties": {"sql": {"type": "string", "description": "A SELECT statement"}},
+                       "required": ["sql"]}}},
+]
+DB_TOOL_NAMES = {t["function"]["name"] for t in TOOL_DB}
+
 _CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯＀-￯]")
 
 
@@ -108,7 +130,7 @@ def excerpt(text: str, query: str, max_chars: int) -> Tuple[str, bool]:
 
 
 def system_prompt(model: str, web_on: bool, has_files: bool, custom: str, medtech_on: bool = False,
-                  medtech_backend: str = "live") -> str:
+                  medtech_backend: str = "live", database: str = "") -> str:
     today = time.strftime("%A, %d %B %Y")
     lines = [
         "You are MedScout Ask, the free-question area of MedScout, a MedTech investment-diligence assistant. "
@@ -159,6 +181,14 @@ def system_prompt(model: str, web_on: bool, has_files: bool, custom: str, medtec
         if medtech_backend != "live":
             lines.append("- These tools now read SYNTHETIC demo data for the fictional case '%s'. Say so whenever "
                          "you use them." % medtech_backend)
+    if database:
+        lines += [
+            "",
+            "Database: you can read the user's own SQLite database with db_list_tables, db_describe_table and "
+            "db_query (read-only SELECT). Check column names before querying, prefer aggregate queries over "
+            "dumping rows, and say which table / query an answer comes from. This is the user's internal data.",
+            database,
+        ]
     if has_files:
         lines += [
             "",
@@ -184,6 +214,11 @@ class Turn:
         self._part_started = time.time()
         self.notices: List[str] = []
         self.medtech_on = False          # MedScout's openFDA / trials / PubMed tools for this answer
+        self.db_on = False               # the user's SQLite database tools for this answer
+        self.db: Any = None              # LocalDB, opened on first use
+        self.escalate_from = ""          # "Try a stronger model": the model the last answer came from
+        self.route: Dict[str, Any] = {}  # the router's decision, shown with the answer
+        self.spent = 0.0                 # USD spent on this answer
 
     def emit(self, event: Dict[str, Any]) -> None:
         if self.client_gone:
@@ -227,9 +262,14 @@ class Turn:
 
 
 class ChatService:
-    def __init__(self, settings: Settings, store: ChatStore, files: FileStore, medtech: Any = None):
+    def __init__(self, settings: Settings, store: ChatStore, files: FileStore, medtech: Any = None,
+                 router: Any = None, database: Callable[[], Any] = lambda: None,
+                 database_notes: Callable[[], str] = lambda: ""):
         self.settings = settings
         self.medtech = medtech            # MedTechTools, or None when MedScout's tools are not available
+        self.router = router              # models.Router: model list, providers, Auto routing
+        self.database = database          # returns the user's LocalDB, or None when none is set
+        self.database_notes = database_notes
         self.store = store
         self.files = files
         self._clients: Dict[str, OllamaClient] = {}
@@ -273,6 +313,10 @@ class ChatService:
         model = str(req.get("model") or self.settings.get("model"))
         web_on = bool(req.get("web_search", self.settings.get("web_search")))
         turn.medtech_on = self.medtech is not None and bool(req.get("medtech", self.settings.get("medtech")))
+        turn.db_on = bool(req.get("database", self.settings.get("database")))
+        turn.escalate_from = str(req.get("escalate_from") or "")
+        retry = retry or bool(turn.escalate_from)
+        allow_cloud = req.get("allow_cloud")
         think = bool(req.get("think", self.settings.get("think")))
 
         chat_id = req.get("chat_id")
@@ -297,10 +341,14 @@ class ChatService:
                 return
             self._active[chat_id] = turn
         try:
+            if allow_cloud is not None:
+                self.store.update(chat_id, lambda c: c.update(allow_cloud=bool(allow_cloud)))
             self._send(chat_id, turn, text, attachment_ids, retry, model, web_on, think)
         finally:
             with self._lock:
                 self._active.pop(chat_id, None)
+            if turn.db is not None:
+                turn.db.close()
 
     def _send(self, chat_id: str, turn: Turn, text: str, attachment_ids: List[str], retry: bool,
               model: str, web_on: bool, think: bool) -> None:
@@ -340,7 +388,7 @@ class ChatService:
             self._generate(chat, turn, model, web_on, think, stats)
         except Cancelled:
             stopped = True
-        except (OllamaError, UploadError) as exc:
+        except (OllamaError, UploadError, LLMError) as exc:
             error = str(exc)
         except Exception as exc:  # noqa: BLE001 - never lose the partial answer because of a bug
             error = "Unexpected error: %s: %s" % (type(exc).__name__, exc)
@@ -353,7 +401,9 @@ class ChatService:
             "parts": turn.parts,
             "sources": turn.sources,
             "notices": turn.notices,
-            "model": model,
+            "model": turn.route.get("model") or model,
+            "model_label": turn.route.get("label") or model,
+            "route": turn.route,
             "time": time.time(),
             "stopped": stopped,
             "error": error,
@@ -363,6 +413,7 @@ class ChatService:
                 "tokens_per_s": round(stats["eval_count"] / (stats["eval_ms"] / 1000.0), 1) if stats["eval_ms"] else None,
                 "context_used": stats["prompt_tokens"],
                 "num_ctx": stats.get("num_ctx"),
+                "cost_usd": round(turn.spent, 6),
             },
         }
         saved = self.store.update(chat_id, lambda c: c["messages"].append(answer))
@@ -373,12 +424,8 @@ class ChatService:
     # ----- the model loop ----------------------------------------------------------------------
     def _generate(self, chat: Dict[str, Any], turn: Turn, model: str, web_on: bool, think: bool,
                   stats: Dict[str, Any]) -> None:
-        client = self.client()
-        info = self.capabilities(model)
-        caps = info.get("capabilities") or []
-        num_ctx = int(self.settings.get("num_ctx"))
-        if info.get("context_length"):
-            num_ctx = min(num_ctx, int(info["context_length"]))
+        m = self._choose_model(chat, turn, model, web_on)
+        provider, caps, num_ctx = self._prepare(m)
         stats["num_ctx"] = num_ctx
 
         if (web_on or turn.medtech_on) and caps and "tools" not in caps:
@@ -388,16 +435,20 @@ class ChatService:
         if think and caps and "thinking" not in caps:
             turn.notice("%s has no thinking mode; answering directly." % model)
 
-        messages, partial_files, file_ids = self._build_messages(chat, turn, model, caps, web_on, think, num_ctx)
+        messages, partial_files, file_ids = self._build_messages(chat, turn, m.label, caps, web_on, think, num_ctx)
         tools: List[Dict[str, Any]] = []
         if web_on:
             tools += [TOOL_WEB_SEARCH, TOOL_FETCH_URL]
         if turn.medtech_on:
             tools += self.medtech.tool_defs()
+        if turn.db_on and (not caps or "tools" in caps):
+            tools += TOOL_DB
         if partial_files and (not caps or "tools" in caps):   # some file text is not in the prompt
             tools.append(TOOL_SEARCH_FILES)
         question = chat["messages"][-1].get("content", "") if chat["messages"] else ""
 
+        limit = float(self.settings.get("max_cost_per_answer") or 0)
+        auto = model == "auto"
         options: Dict[str, Any] = {"num_ctx": num_ctx}
         temperature = self.settings.get("temperature")
         if temperature is not None:
@@ -408,8 +459,21 @@ class ChatService:
 
         for round_no in range(max_rounds + 1):
             last_round = round_no == max_rounds or calls_made >= MAX_TOOL_CALLS
-            body: Dict[str, Any] = {"model": model, "messages": messages, "options": options,
-                                    "keep_alive": self.settings.get("keep_alive")}
+            if not m.local and limit > 0:          # the per-answer cost limit, checked before every round
+                est = m.cost(estimate_tokens(json.dumps(messages, ensure_ascii=False)), self._max_out())
+                if turn.spent + est > limit:
+                    if not auto:
+                        raise BudgetExceeded("Stopped: another round with %s (~$%.4f) would pass this answer's "
+                                             "cost limit of $%.2f (spent $%.4f). Raise the limit in Settings or "
+                                             "use a local model." % (m.label, est, limit, turn.spent))
+                    local = self._local_fallback(caps_needed=bool(tools))
+                    turn.notice("Cost limit: switched from %s to %s for the rest of this answer." % (m.label, local.label))
+                    m = local
+                    provider, caps, num_ctx = self._prepare(m)
+                    options["num_ctx"] = num_ctx
+                    turn.route.update(model=m.alias, label=m.label, local=True)
+            body: Dict[str, Any] = {"model": m.id, "messages": messages, "options": options,
+                                    "keep_alive": self.settings.get("keep_alive"), "max_tokens": self._max_out()}
             if tools and not last_round:
                 body["tools"] = tools
             if "thinking" in caps:
@@ -418,22 +482,20 @@ class ChatService:
                 messages.append({"role": "system", "content": "You have used all your tool calls. "
                                  "Answer the user now with the information you have."})
 
-            round_text, round_thinking, calls = "", "", []
             stats["rounds"] += 1
-            for chunk in client.chat(body, turn.cancel):
-                msg = chunk.get("message") or {}
-                if msg.get("thinking"):
-                    round_thinking += msg["thinking"]
-                    turn.delta("thinking", msg["thinking"])
-                if msg.get("content"):
-                    round_text += msg["content"]
-                    turn.delta("text", msg["content"])
-                if msg.get("tool_calls"):
-                    calls.extend(msg["tool_calls"])
-                if chunk.get("done"):
-                    stats["eval_count"] += int(chunk.get("eval_count") or 0)
-                    stats["eval_ms"] += int(chunk.get("eval_duration") or 0) / 1e6
-                    stats["prompt_tokens"] = int(chunk.get("prompt_eval_count") or 0) + int(chunk.get("eval_count") or 0)
+            try:
+                round_text, round_thinking, calls = self._stream_round(provider, body, turn, m, stats)
+            except (LLMError, OllamaError) as exc:
+                if not auto or m.local or turn.answer_text() or round_no > 0:
+                    raise
+                local = self._local_fallback(caps_needed=bool(tools))     # cloud model failed: stay useful
+                turn.notice("%s failed (%s); answered with %s instead." % (m.label, str(exc)[:160], local.label))
+                m = local
+                provider, caps, num_ctx = self._prepare(m)
+                options["num_ctx"] = num_ctx
+                body["model"] = m.id
+                turn.route.update(model=m.alias, label=m.label, local=True)
+                round_text, round_thinking, calls = self._stream_round(provider, body, turn, m, stats)
             turn.close_part()
             if not calls:
                 return
@@ -443,6 +505,8 @@ class ChatService:
                                 "or ask more specifically.")
                 return
 
+            for i, call in enumerate(calls):
+                call.setdefault("id", "call_%d_%d" % (round_no, i))      # OpenAI-style APIs need ids
             assistant = {"role": "assistant", "content": round_text, "tool_calls": calls}
             if round_thinking:
                 assistant["thinking"] = round_thinking
@@ -460,12 +524,146 @@ class ChatService:
                     args = {}
                 calls_made += 1
                 result = self._run_tool(turn, name, args, chat, file_ids, question, num_ctx, tool_cache)
-                reply = {"role": "tool", "tool_name": name, "content": result}
-                if call.get("id"):
-                    reply["tool_call_id"] = call["id"]
+                reply = {"role": "tool", "tool_name": name, "content": result, "tool_call_id": call["id"]}
                 messages.append(reply)
                 if turn.cancel.cancelled:
                     raise Cancelled()
+
+    # ----- models: choose, prepare, stream ------------------------------------------------------------
+    def _max_out(self) -> int:
+        return 2 * self.router.max_out if self.router else 4096
+
+    @staticmethod
+    def _is_private(chat: Dict[str, Any]) -> bool:
+        """The chat holds the user's own material: attached files / briefs, or database results."""
+        for msg in chat.get("messages", []):
+            if msg.get("role") == "user" and msg.get("attachments"):
+                return True
+            if any(p.get("type") == "tool" and p.get("name") in DB_TOOL_NAMES for p in msg.get("parts") or []):
+                return True
+        return False
+
+    def _choose_model(self, chat: Dict[str, Any], turn: Turn, choice: str, web_on: bool):
+        """Ask the router which model answers; tell the page why."""
+        current = chat["messages"][-1] if chat["messages"] else {}
+        question = current.get("content", "")
+        allow_cloud = bool(chat.get("allow_cloud"))
+        if turn.db_on:
+            try:
+                db = self.database()
+            except DatabaseError as exc:
+                db = None
+                turn.notice("Database not available: %s" % exc)
+            if db is None:
+                turn.db_on = False
+            else:
+                turn.db = db
+        needs = Needs(tools=web_on or turn.medtech_on or turn.db_on,
+                      vision=any(a.get("kind") == "image" for a in current.get("attachments") or []),
+                      tokens=min(sum(estimate_tokens(m.get("content", "")) for m in chat["messages"][-12:]), 60000),
+                      private=self._is_private(chat) or turn.db_on, allow_cloud=allow_cloud,
+                      limit=float(self.settings.get("max_cost_per_answer") or 0))
+        if choice == "auto":
+            decision = self.router.for_ask(question, needs, self.router.classifier(self.settings.ollama_url()),
+                                           escalate_from=turn.escalate_from)
+        else:
+            m = self.router.reg.get(choice)
+            if not m.local and turn.db_on and not allow_cloud and not self._is_private(chat):
+                turn.db_on = False         # keep the database private; the question itself may go out
+                needs.private = False
+                needs.tools = web_on or turn.medtech_on
+                turn.notice("Database tools are off: %s is a cloud model. Allow cloud for this chat to use them." % m.label)
+            decision = self.router.single(choice, needs)
+        turn.route = decision.view()
+        turn.emit({"type": "route", **turn.route})
+        return decision.model
+
+    def _prepare(self, m: Any):
+        """(provider, capabilities, context size) for model m."""
+        url = self.settings.ollama_url()
+        num_ctx = int(self.settings.get("num_ctx"))
+        if m.local:
+            info = self.capabilities(m.id)
+            caps = info.get("capabilities") or []
+            if info.get("context_length"):
+                num_ctx = min(num_ctx, int(info["context_length"]))
+        else:
+            caps = [c for c, ok in (("tools", m.tools), ("vision", m.vision), ("thinking", m.thinking)) if ok]
+            num_ctx = min(num_ctx, m.context or num_ctx)
+        return self.router.provider(m, url if m.local else None), caps, num_ctx
+
+    def _local_fallback(self, caps_needed: bool):
+        for m in self.router.reg.all():
+            if m.local and self.router.reg.available(m)[0] and (m.tools or not caps_needed):
+                return m
+        raise LLMError("no local model is available to continue")
+
+    def _stream_round(self, provider: Any, body: Dict[str, Any], turn: Turn, m: Any,
+                      stats: Dict[str, Any]) -> Tuple[str, str, List[Dict[str, Any]]]:
+        """One model round, streamed live to the page. Returns (text, thinking, tool calls)."""
+        round_text, round_thinking, calls = "", "", []
+        for chunk in provider.stream(body, turn.cancel):
+            msg = chunk.get("message") or {}
+            if msg.get("thinking"):
+                round_thinking += msg["thinking"]
+                turn.delta("thinking", msg["thinking"])
+            if msg.get("content"):
+                round_text += msg["content"]
+                turn.delta("text", msg["content"])
+            if msg.get("tool_calls"):
+                calls.extend(msg["tool_calls"])
+            if chunk.get("done"):
+                cost = chunk.get("cost")
+                if cost is None:
+                    cost = m.cost(int(chunk.get("prompt_eval_count") or 0), int(chunk.get("eval_count") or 0))
+                turn.spent += float(cost)
+                stats["eval_count"] += int(chunk.get("eval_count") or 0)
+                stats["eval_ms"] += int(chunk.get("eval_duration") or 0) / 1e6
+                stats["prompt_tokens"] = int(chunk.get("prompt_eval_count") or 0) + int(chunk.get("eval_count") or 0)
+        return round_text, round_thinking, calls
+
+    # ----- the user's database ------------------------------------------------------------------------
+    def _db(self, turn: Turn):
+        if turn.db is None:
+            turn.db = self.database()
+            if turn.db is None:
+                raise DatabaseError("no database is connected (console: Models & data tab)")
+        return turn.db
+
+    def _db_overview(self, turn: Turn) -> str:
+        try:
+            db = self._db(turn)
+            notes = (self.database_notes() or "").strip()
+            return "Database %s - tables:\n%s%s" % (db.name, schema_text(db), ("\nOwner's note: " + notes) if notes else "")
+        except DatabaseError as exc:
+            turn.db_on = False
+            turn.notice("Database not available: %s" % exc)
+            return ""
+
+    def _db_tool(self, turn: Turn, part: Dict[str, Any], name: str, args: Dict[str, Any]) -> str:
+        try:
+            db = self._db(turn)
+            if name == "db_list_tables":
+                text = "Tables in %s:\n%s" % (db.name, schema_text(db))
+                where = "table list"
+            elif name == "db_describe_table":
+                d = db.describe(str(args.get("table") or ""))
+                text = json.dumps(d, ensure_ascii=False, default=str)[:6000]
+                where = "table %s" % d["name"]
+            else:
+                sql = str(args.get("sql") or "")
+                res = db.query(sql)
+                part["sql"] = sql
+                part["label"] = "Queried your database (%d row%s)" % (res["row_count"], "" if res["row_count"] == 1 else "s")
+                text = "Query:\n%s\n\nResult:\n%s" % (sql, as_markdown(res))
+                where = "query: " + " ".join(sql.split())[:120]
+        except DatabaseError as exc:
+            part["ok"] = False
+            part["error"] = str(exc)
+            return "Database error: %s. Fix the query and try again." % exc
+        n = turn.add_source("Your database (%s): %s" % (db.name, where), "localdb://%s/%s" % (db.name, part["id"]), "")
+        part["results"] = [{"n": n, "title": "Your database: " + where, "url": "", "snippet": ""}]
+        return "[%d] %s\nCite as [%d] when you use these figures." % (n, text, n)
 
     # ----- tools -------------------------------------------------------------------------------
     def _run_tool(self, turn: Turn, name: str, args: Dict[str, Any], chat: Dict[str, Any],
@@ -481,6 +679,10 @@ class ChatService:
             part["label"] = 'Searched your files for "%s"' % str(args.get("query", "")).strip()
         elif turn.medtech_on and name in self.medtech.names:
             part["label"] = self.medtech.label(name, args)
+        elif turn.db_on and name in DB_TOOL_NAMES:
+            part["label"] = {"db_list_tables": "Listed the tables in your database",
+                             "db_describe_table": "Looked at table %s" % args.get("table", ""),
+                             "db_query": "Queried your database"}[name]
         else:
             part["label"] = "Unknown tool %s" % name
         turn.close_part()
@@ -567,6 +769,9 @@ class ChatService:
             part["label"] = 'Searched your files for "%s" (%d passages)' % (query, len(out))
             return "\n\n---\n\n".join(out)
 
+        if turn.db_on and name in DB_TOOL_NAMES:
+            return self._db_tool(turn, part, name, args)
+
         if turn.medtech_on and name in self.medtech.names:
             text, results, error = self.medtech.run(name, args, self.settings.get("medtech_backend"), turn.add_source)
             part["results"] = results
@@ -585,10 +790,11 @@ class ChatService:
         file_ids = [a["id"] for m in msgs if m["role"] == "user" for a in m.get("attachments", [])
                     if a.get("kind") == "text"]
         system = system_prompt(model, web_on, bool(file_ids), self.settings.get("custom_instructions") or "",
-                               turn.medtech_on, self.settings.get("medtech_backend"))
+                               turn.medtech_on, self.settings.get("medtech_backend"),
+                               self._db_overview(turn) if turn.db_on else "")
         vision = "vision" in caps
         reply_reserve = min(num_ctx // 4, 6000 if think else 2500)
-        tool_reserve = min(num_ctx // 4, 7000) if (web_on or turn.medtech_on) else (min(num_ctx // 6, 3000) if file_ids else 0)
+        tool_reserve = min(num_ctx // 4, 7000) if (web_on or turn.medtech_on or turn.db_on) else (min(num_ctx // 6, 3000) if file_ids else 0)
         budget = num_ctx - reply_reserve - tool_reserve - estimate_tokens(system) - 300
         partial: List[str] = []
         out: List[Dict[str, Any]] = []

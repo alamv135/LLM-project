@@ -154,7 +154,7 @@ function setRun(id) {
 }
 
 // ------------------------------------------------------------------ router
-const VIEWS = ["new", "control", "results", "history", "ask", "tools", "files", "eval", "connection"];
+const VIEWS = ["new", "control", "results", "history", "ask", "tools", "files", "eval", "models", "connection"];
 function route() {
   const name = (location.hash || "#new").slice(1);
   const view = VIEWS.includes(name) ? name : "new";
@@ -162,13 +162,14 @@ function route() {
   document.querySelectorAll("nav.tabs a").forEach((a) => a.setAttribute("aria-current", a.getAttribute("href") === "#" + view ? "page" : "false"));
   document.body.classList.toggle("ask-mode", view === "ask");
   const build = { new: buildNew, control: buildControl, results: buildResults, history: buildHistory, ask: buildAsk, tools: buildTools,
-    files: buildFiles, eval: buildEval, connection: buildConnection }[view];
+    files: buildFiles, eval: buildEval, models: buildModels, connection: buildConnection }[view];
   if (!S.built[view]) { build(); S.built[view] = true; }
   if (view === "control") { redrawFeed(); renderControl([]); }
   if (view === "results") renderResults(true);
   if (view === "history") refreshHistory();
   if (view === "eval") refreshEval();
   if (view === "ask") sizeAsk();
+  if (view === "models") refreshModels(false);
 }
 
 // ------------------------------------------------------------------ NEW RUN
@@ -187,8 +188,9 @@ const LIMIT_INFO = {
   context_window: ["Context window (tokens)", "Older tool results are compressed to fit."],
   reserved_output: ["Reserved for output (tokens)", ""],
   max_records_per_observation: ["Records per tool result", "Shown to the model; the rest stays in the evidence store."],
+  max_cost_usd: ["Max API cost for this run ($)", "Router provider: API models stop (single model) or Auto switches to local models when this would be passed. 0 = no limit."],
 };
-const FLOAT_LIMITS = new Set(["run_deadline_s", "task_deadline_s", "tool_timeout_s", "retry_base_delay_s"]);
+const FLOAT_LIMITS = new Set(["run_deadline_s", "task_deadline_s", "tool_timeout_s", "retry_base_delay_s", "max_cost_usd"]);
 const FLAG_INFO = {
   review_claims: ["Review claims before planning", "Drop claims, fix wording or change the category."],
   review_plan: ["Review the research plan", "Reorder, drop or edit tasks and pick the skill for each."],
@@ -238,7 +240,7 @@ function buildNew() {
       h("b", { text: "Live public APIs" }), " below, otherwise the FDA, registry and PubMed tools report 'unavailable'."));
 
   const flagChecks = Object.entries(FLAG_INFO).map(([k, [l, hlp]]) => check("flag-" + k, l, hlp, PRESETS.review[k]));
-  const limitInputs = Object.entries(cfg.limits).map(([k, val]) => field((LIMIT_INFO[k] || [k])[0],
+  const limitInputs = Object.entries(cfg.limits).filter(([k]) => k !== "max_cost_usd").map(([k, val]) => field((LIMIT_INFO[k] || [k])[0],
     h("input", { type: "number", id: "lim-" + k, value: val, min: FLOAT_LIMITS.has(k) ? "0" : "1", step: FLOAT_LIMITS.has(k) ? "0.1" : "1" }),
     (LIMIT_INFO[k] || [, ""])[1]));
   const focusChecks = [
@@ -260,14 +262,20 @@ function buildNew() {
       h("div", { class: "panel" },
         h("header", {}, h("h2", { text: "Model and data" })),
         h("div", { class: "grid2" },
-          field("Provider", select("provider", [["mock", "Mock (offline, scripted)"], ["ollama", "Ollama (local model)"], ["openai", "OpenAI-compatible / Azure"]], d.provider)),
-          field("Model", h("input", { type: "text", id: "model", value: d.model, placeholder: d.default_models[d.provider] }), "Blank = provider default."),
+          field("Provider", select("provider", [["router", "Model list: one model or Auto router"], ["mock", "Mock (offline, scripted)"], ["ollama", "Ollama (local model)"], ["openai", "OpenAI-compatible / Azure"]], d.provider)),
+          field("Model", h("input", { type: "text", id: "model", value: d.model, placeholder: d.default_models[d.provider] || "auto", list: "model-aliases" }),
+            "Model list: auto = local first, API models only when a step needs them (see Models & data); or one name such as claude, deepseek, qwen-local."),
+          h("datalist", { id: "model-aliases" }, h("option", { value: "auto" }), (cfg.models || []).map((m) => h("option", { value: m.alias, text: m.label }))),
           field("Temperature", h("input", { type: "number", id: "temperature", value: d.temperature, min: "0", max: "2", step: "0.1" })),
           field("Public sources", select("backend", [["mirror", "Offline mirror (demo cases)"], ["live", "Live public APIs"]], d.backend)),
           field("Tool transport", select("transport", [["local", "In-process functions"], ["mcp", "MCP server (FastMCP)"]], d.tool_transport)),
           h("div", { class: "grid2" },
             field("$ / 1M input tokens", h("input", { type: "number", id: "price-in", value: d.price_in_per_m, min: "0", step: "0.01" })),
             field("$ / 1M output tokens", h("input", { type: "number", id: "price-out", value: d.price_out_per_m, min: "0", step: "0.01" })))),
+        field((LIMIT_INFO.max_cost_usd)[0], h("input", { type: "number", id: "lim-max_cost_usd", value: cfg.limits.max_cost_usd, min: "0", step: "0.05" }), LIMIT_INFO.max_cost_usd[1]),
+        h("div", { style: "display:grid;gap:6px;margin-top:10px" },
+          check("allow-cloud", "Allow cloud models to read my uploaded documents", "Off (default): with your own documents, only local models are used. Demo cases are fictional, so this does not apply to them.", false),
+          check("use-database", "Let the agent query my database", cfg.database ? "Read-only SELECT queries on the database set in Models & data. Its data counts as private." : "No database connected yet: set one in Models & data.", false)),
         h("p", { class: "small muted" }, "Endpoints and API keys are set on the ", h("a", { href: "#connection", text: "Model connection" }), " tab.")),
       h("div", { class: "panel" },
         h("header", {}, h("div", {}, h("h2", { text: "How much control" }), h("p", { class: "muted small", text: "You can change these while the run is going." })),
@@ -326,6 +334,7 @@ function modelSettings() {
     provider: $("#provider").value, model: $("#model").value.trim(), temperature: $("#temperature").value,
     backend: $("#backend").value, tool_transport: $("#transport").value,
     price_in_per_m: $("#price-in").value, price_out_per_m: $("#price-out").value,
+    allow_cloud: $("#allow-cloud").checked, use_database: $("#use-database").checked,
   };
 }
 
@@ -994,6 +1003,96 @@ function evalTable(rows, meta) {
   return h("div", {}, out);
 }
 
+// ------------------------------------------------------------------ MODELS & DATA
+const fmtPrice = (m) => (m.local ? "free (local)" : `$${Number(m.price_in).toFixed(2)} / $${Number(m.price_out).toFixed(2)}`);
+const TIER = ["local", "cheap API", "premium API"];
+function buildModels() {
+  fill($("#view-models"),
+    h("div", { class: "panel" },
+      h("header", {}, h("div", {}, h("h2", { text: "Models" }),
+        h("p", { class: "small muted" }, "From ", h("code", { text: "config/models.json" }), " (edit it on the ", h("a", { href: "#files", text: "Prompts & skills" }),
+          " tab). Prices are per 1M tokens (input / output) and refresh from OpenRouter's model list. The OpenRouter key goes on the ",
+          h("a", { href: "#connection", text: "Model connection" }), " tab.")),
+        h("button", { type: "button", on: { click: () => refreshModels(true) } }, "Refresh prices & status")),
+      h("div", { id: "models-info", class: "small muted" }), h("div", { id: "models-body" })),
+    h("div", { class: "grid2" },
+      h("div", { class: "panel" },
+        h("header", {}, h("div", {}, h("h2", { text: "How Auto routing works" }))),
+        h("div", { class: "small", id: "router-explain" }),
+        h("h3", { style: "margin-top:14px", text: "Try the router" }),
+        h("p", { class: "small muted", text: "Shows which model Ask's Auto mode would pick. Nothing is answered (rating the question uses the free local model)." }),
+        h("div", { style: "display:grid;gap:8px" },
+          h("textarea", { id: "route-q", rows: 3, placeholder: "e.g. Compare the 510(k) and De Novo pathways for an AI ECG patch and recommend one" }),
+          h("div", { class: "row" }, check("route-private", "Chat has my files / database data", "", false), check("route-allow", "Cloud allowed", "", false)),
+          h("div", { class: "row end" }, h("button", { type: "button", class: "primary", on: { click: previewRoute } }, "Which model?")),
+          h("div", { id: "route-out" }))),
+      h("div", { class: "panel" },
+        h("header", {}, h("div", {}, h("h2", { text: "My database (SQLite)" }),
+          h("p", { class: "small muted", text: "The AI can read it (SELECT only) in Ask and, if you tick it, in runs. Its data is private: it stays on local models unless you allow cloud." }))),
+        h("div", { style: "display:grid;gap:10px" },
+          field("Database file", h("input", { type: "text", id: "db-path", placeholder: "/Users/you/Documents/deals.sqlite" }), "Full path to a .sqlite / .db file on this computer. Empty = no database."),
+          field("What is in it (helps the AI)", h("textarea", { id: "db-notes", rows: 3, placeholder: "e.g. deals = companies we screened; meetings = notes per company; amounts in USD thousands" })),
+          h("div", { class: "row end" }, h("button", { type: "button", class: "primary", on: { click: saveDatabase } }, "Save & test")),
+          h("div", { id: "db-out" })))));
+  loadDatabase();
+}
+async function refreshModels(force) {
+  const body = $("#models-body");
+  if (!body) return;
+  fill(body, h("p", { class: "small muted", text: "Checking Ollama and OpenRouter…" }));
+  try {
+    const r = await api("GET", "/api/models" + (force ? "?refresh=1" : ""));
+    fill($("#models-info"), r.info.map((x) => h("div", { text: x })), r.openrouter_key_set ? null : h("div", { class: "callout warn small", style: "margin:8px 0" },
+      "No OpenRouter key yet: cloud models are skipped and Auto uses local models only. Add it on ", h("a", { href: "#connection", text: "Model connection" }), "."));
+    fill(body, h("div", { class: "tbl" }, h("table", {},
+      h("thead", {}, h("tr", {}, ["Name", "Model", "Kind", "Price in / out", "Context", "Can do", "Status", ""].map((x) => h("th", { text: x })))),
+      h("tbody", {}, r.models.map((m) => h("tr", {},
+        h("td", {}, h("b", { text: m.alias })), h("td", {}, m.label, h("div", { class: "small muted mono", text: m.id })),
+        h("td", { text: TIER[m.tier] || "tier " + m.tier }), h("td", { class: "small", text: fmtPrice(m) }),
+        h("td", { class: "num small", text: fmtNum(m.context) }),
+        h("td", { class: "small", text: [m.tools && "tools", m.vision && "images", m.thinking && "thinking", m.json_schema && "JSON schema"].filter(Boolean).join(", ") }),
+        h("td", { class: "small" }, m.available ? h("span", { class: "pill done", text: "ready" }) : h("span", { class: "pill error", text: m.why }), m.notes.map((n) => h("div", { class: "muted", text: n }))),
+        h("td", {}, h("button", { type: "button", class: "small", on: { click: (e) => testModel(m.alias, e.target) } }, "Test"))))))));
+    const rt = r.router;
+    fill($("#router-explain"),
+      h("p", {}, "Ask: a free local model (", h("code", { text: rt.classifier }), ") rates each question, then the first model in its list that passes the checks answers:"),
+      h("ul", {}, Object.entries(rt.ask || {}).map(([k, v]) => h("li", {}, h("b", { text: k }), ": " + v.join(" → ")))),
+      h("p", {}, "Runs: each step has its own list; after a failed step (broken JSON, rejected verdict) that step moves up a tier:"),
+      h("ul", {}, Object.entries(rt.run || {}).map(([k, v]) => h("li", {}, h("b", { text: k }), ": " + v.join(" → ")))),
+      h("p", { class: "muted", text: "Checks, in order: private data stays local unless allowed · the model can do tools / images / long context · key set or model downloaded · the call fits the task's cost limit. Type @claude (or any name) in an Ask message to choose yourself." }));
+  } catch (e) { fill(body, h("div", { class: "callout bad", text: e.message })); }
+}
+async function testModel(alias, btn) {
+  btn.disabled = true; btn.textContent = "…";
+  try {
+    const r = await api("POST", "/api/models/test", { model: alias });
+    toast(r.ok ? `${alias}: answered in ${r.latency_ms} ms, ${r.tokens_in}+${r.tokens_out} tokens, $${r.cost_usd.toFixed(5)}` : `${alias}: ${r.error}`, !r.ok);
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; btn.textContent = "Test"; }
+}
+async function previewRoute() {
+  const out = $("#route-out");
+  fill(out, h("p", { class: "small muted", text: "Asking the router…" }));
+  try {
+    const r = await api("POST", "/api/models/route", { question: $("#route-q").value, private: $("#route-private").checked, allow_cloud: $("#route-allow").checked });
+    fill(out, r.ok ? h("div", { class: "callout small" }, h("b", { text: "→ " + r.label }), ` (${r.local ? "local, free" : TIER[r.tier]}) · ${r.reason}`)
+      : h("div", { class: "callout bad small", text: r.error }));
+  } catch (e) { fill(out, h("div", { class: "callout bad small", text: e.message })); }
+}
+function renderDatabase(d) {
+  $("#db-path").value = d.database_path || ""; $("#db-notes").value = d.database_notes || "";
+  $("#db-path").disabled = d.from_env;
+  fill($("#db-out"), d.error ? h("div", { class: "callout bad small", text: d.error }) : !d.connected ? h("p", { class: "small muted", text: "No database connected." })
+    : h("div", {}, h("p", { class: "small" }, h("b", { text: d.name }), ` · ${d.tables.length} tables (read-only)`, d.from_env ? " · set by MEDSCOUT_DATA_DB" : ""),
+      h("div", { class: "tbl" }, h("table", {}, h("thead", {}, h("tr", {}, ["Table", "Rows", "Columns"].map((x) => h("th", { text: x })))),
+        h("tbody", {}, d.tables.map((t) => h("tr", {}, h("td", { class: "mono", text: t.name }), h("td", { class: "num", text: fmtNum(t.rows) }), h("td", { class: "small", text: t.columns.join(", ") }))))))));
+}
+async function loadDatabase() { try { renderDatabase(await api("GET", "/api/database")); } catch (e) { toast(e.message, true); } }
+async function saveDatabase() {
+  try { renderDatabase(await api("POST", "/api/database", { database_path: $("#db-path").value.trim(), database_notes: $("#db-notes").value })); toast("Database settings saved"); S.config.database = !!$("#db-path").value.trim(); }
+  catch (e) { fill($("#db-out"), h("div", { class: "callout bad small", text: e.message })); }
+}
+
 // ------------------------------------------------------------------ CONNECTION
 const CONN_FIELDS = [
   ["openai_base_url", "OpenAI-compatible base URL", "text", "e.g. https://api.openai.com/v1 or http://localhost:8000/v1"],
@@ -1001,6 +1100,7 @@ const CONN_FIELDS = [
   ["azure_endpoint", "Azure-style endpoint", "text", "Set this instead of the base URL for Azure deployments"],
   ["azure_api_key", "Azure API key", "password", ""],
   ["azure_api_version", "Azure API version", "text", "e.g. 2024-06-01"],
+  ["openrouter_api_key", "OpenRouter API key (Claude, DeepSeek, Gemini...)", "password", ""],
   ["ollama_host", "Ollama host", "text", "default http://localhost:11434"],
   ["openfda_api_key", "openFDA API key (optional)", "password", ""],
   ["ncbi_email", "NCBI email (PubMed etiquette)", "text", ""],

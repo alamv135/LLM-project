@@ -1,0 +1,123 @@
+"""A fake OpenRouter (OpenAI-compatible API) for tests: model list, JSON answers and SSE streaming.
+
+  GET  /api/v1/models               catalog with prices (USD per token, as strings) and abilities
+  POST /api/v1/chat/completions     stream=false -> MedScout's mock policy answer (valid run JSON)
+                                    stream=true  -> scripted chat: "search" -> a web_search tool call
+                                    split over several chunks; after a tool result -> an answer citing [1]
+Every answer reports usage with a cost, as OpenRouter does. Requests are kept in FakeOpenRouter.requests.
+"""
+from __future__ import annotations
+
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Dict, List
+
+COST = 0.0123            # USD reported for every call
+
+CATALOG = {"data": [
+    {"id": "deepseek/deepseek-v4.1-flash", "name": "DeepSeek", "context_length": 131072,
+     "pricing": {"prompt": "0.0000002", "completion": "0.0000008"},
+     "supported_parameters": ["tools", "response_format", "structured_outputs", "reasoning"],
+     "architecture": {"input_modalities": ["text"]}},
+    {"id": "google/gemini-3.8-flash", "name": "Gemini", "context_length": 1000000,
+     "pricing": {"prompt": "0.00000075", "completion": "0.00000375"},
+     "supported_parameters": ["tools", "response_format", "structured_outputs"],
+     "architecture": {"input_modalities": ["text", "image"]}},
+    {"id": "anthropic/claude-sonnet-5.5", "name": "Claude", "context_length": 1000000,
+     "pricing": {"prompt": "0.000003", "completion": "0.000015"},
+     "supported_parameters": ["tools", "response_format", "reasoning"],
+     "architecture": {"input_modalities": ["text", "image"]}},
+]}
+
+
+class QuietServer(ThreadingHTTPServer):
+    """Clients closing kept-alive connections are normal here; do not print them."""
+    def handle_error(self, request, client_address):  # noqa: ANN001
+        import sys
+        if not isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
+            super().handle_error(request, client_address)
+
+
+class FakeOpenRouter(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    requests: List[Dict[str, Any]] = []
+
+    def log_message(self, *a: Any) -> None:
+        pass
+
+    def _json(self, data: Any, status: int = 200) -> None:
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/api/v1/models":
+            return self._json(CATALOG)
+        return self._json({"error": {"message": "not found"}}, 404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        body["_auth"] = self.headers.get("Authorization")
+        FakeOpenRouter.requests.append(body)
+        if self.path != "/api/v1/chat/completions":
+            return self._json({"error": {"message": "not found"}}, 404)
+        if not (body.get("_auth") or "").startswith("Bearer "):
+            return self._json({"error": {"message": "No auth credentials found"}}, 401)
+        if body.get("model") not in {m["id"] for m in CATALOG["data"]}:
+            return self._json({"error": {"message": "model not found"}}, 404)
+        usage = {"prompt_tokens": 300, "completion_tokens": 40, "cost": COST}
+        if not body.get("stream"):
+            from medscout import mock_policy
+            msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else ""}
+                    for m in body["messages"]]
+            text = mock_policy.respond(msgs)
+            return self._json({"model": body["model"], "usage": usage,
+                               "choices": [{"message": {"role": "assistant", "content": text}}]})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+        def send(obj: Any) -> None:
+            data = (": OPENROUTER PROCESSING\n\n" if obj is None else
+                    "data: %s\n\n" % (obj if isinstance(obj, str) else json.dumps(obj))).encode()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+            self.wfile.flush()
+
+        def delta(d: Dict[str, Any], finish: Any = None) -> Dict[str, Any]:
+            return {"choices": [{"index": 0, "delta": d, "finish_reason": finish}]}
+
+        msgs = body["messages"]
+        last = msgs[-1]
+        user = next((m for m in reversed(msgs) if m["role"] == "user"), {})
+        text = user.get("content") if isinstance(user.get("content"), str) else \
+            " ".join(p.get("text", "") for p in user.get("content") or [] if isinstance(p, dict))
+        tools = {t["function"]["name"] for t in body.get("tools") or []}
+        send(None)
+        if last["role"] == "tool":
+            send(delta({"role": "assistant", "content": "Cloud answer from the results "}))
+            send(delta({"content": "[1]."}, "stop"))
+        elif "search" in text.lower() and "web_search" in tools:
+            send(delta({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_abc", "type": "function",
+                                                             "function": {"name": "web_search", "arguments": ""}}]}))
+            send(delta({"tool_calls": [{"index": 0, "function": {"arguments": '{"query": "ollama '}}]}))
+            send(delta({"tool_calls": [{"index": 0, "function": {"arguments": 'release"}'}}]}, "tool_calls"))
+        else:
+            if body.get("reasoning"):
+                send(delta({"role": "assistant", "reasoning": "Thinking in the cloud. "}))
+            for word in ("Cloud ", "model ", "%s " % body["model"], "says hello."):
+                send(delta({"content": word}))
+        send({"choices": [], "usage": usage})
+        send("[DONE]")
+        self.wfile.write(b"0\r\n\r\n")
+
+
+def start() -> ThreadingHTTPServer:
+    srv = QuietServer(("127.0.0.1", 0), FakeOpenRouter)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv

@@ -25,7 +25,7 @@ pip install -r requirements.txt
 ```bash
 python run.py ui --open                 # web interface + run controller at http://127.0.0.1:8765
 python run.py demo                      # same agent from the terminal: fictional Nordleaf Cardio case, offline
-python run.py test                      # 84 unit/integration tests, no model or network needed
+python run.py test                      # 107 unit/integration tests, no model or network needed
 python run.py eval                      # 4 scenarios x {medscout, direct, rag} -> eval/results/
 ```
 
@@ -47,7 +47,8 @@ browser console. Use `--port` to change the port and `--open` to open the browse
 | **Tools** | Run any tool through the real gateway (validation, timeout, retries, fault injection) without a model. |
 | **Prompts & skills** | Edit `prompts/*.md`, every `SKILL.md` and reference, and `eval/cases.json`; changes apply to the next run. |
 | **Evaluation** | Run the scenarios against MedScout and the baselines and compare the metrics; load past results. |
-| **Model connection** | Set OpenAI-compatible / Azure / Ollama endpoints and keys (kept in server memory only, never written to disk) and test the connection. |
+| **Models & data** | The model list (local + OpenRouter) with prices, abilities and status, a **Test** button per model, how Auto routing works, **Try the router**, and **My database** (connect a SQLite file the AI may read). |
+| **Model connection** | Set OpenRouter / OpenAI-compatible / Azure / Ollama endpoints and keys (kept in server memory only, never written to disk) and test the connection. |
 
 How the controller works (`medscout/control.py`): the runtime calls `gate()` before every phase,
 task and model decision, and `request()` when it needs a human (claim review, plan review, tool approval,
@@ -103,6 +104,60 @@ MEDSCOUT_MOCK_FAULTS="malformed:1,ungrounded:1" python run.py demo
 
 Cost accounting: `export MEDSCOUT_PRICE_IN=<USD per 1M input tokens> MEDSCOUT_PRICE_OUT=<...>`.
 Keep credentials in environment variables only (never in the repo / submission).
+
+### Models, the Auto router, cost limits and your database
+
+**One model or Auto.** Everywhere a model is chosen (Ask's model menu, New run → provider *Model list*,
+`--provider router --model ...`) you can pick **one model** (local or API) or **Auto**. Auto's goal is to
+**spend API tokens only when the job needs them**:
+
+| Where | How Auto chooses |
+|---|---|
+| Ask | Greetings and very short questions stay local without any check. Otherwise the free local model (`qwen-local`) rates the question *easy / medium / hard / expert*; the `router.ask` lists in `config/models.json` map that to models (easy/medium → local, hard → DeepSeek → Gemini → Claude, expert → Claude first). Type `@claude` (or any name) to choose yourself; **Try a stronger model** under an answer re-asks one tier higher. |
+| Runs | Each step has a list (`router.run`): `extract_claims` and `plan` (few calls, decide the whole run) → DeepSeek; `research` (most calls) → local Qwen. When a step fails (broken JSON, verdict rejected by the verifier) that step of that task moves up a tier. |
+
+Every candidate is checked in this order, and the first that passes is used (the reason is shown under
+each Ask answer and stored in each run's `trace.jsonl` as `route`):
+1. **Privacy**: your uploaded documents / briefs and database data never go to a cloud model unless you
+   allow it (Ask: the "Files stay local" button per chat; runs: *Allow cloud models to read my uploaded
+   documents*, `--allow-cloud`). Demo cases are fictional and not private. With one cloud model chosen,
+   a private task is refused with an explanation instead.
+2. **Ability**: tools, images and context size.
+3. **Ready**: OpenRouter key set / model downloaded in Ollama. If a cloud model fails, Auto continues with a local one.
+4. **Cost limit per task** (you set it): Ask → Settings → *Cost limit per answer* (default $0.10); runs →
+   New run → *Max API cost for this run* or `--max-cost 0.50` (0 = no limit). Before each call the cost
+   is estimated from the prompt size and the price; Auto switches to a local model before passing the
+   limit, a single API model stops with a message. Real costs come from OpenRouter's usage report.
+
+**The model list** is `config/models.json` (edit it on the *Prompts & skills* tab; a broken file is refused):
+
+| Name | Model | Kind | Price in / out per 1M tokens* |
+|---|---|---|---|
+| `qwen-local` | qwen3.5:9b (Ollama) | local, free | – |
+| `gemma-local` | gemma4:e4b (Ollama) | local, free | – |
+| `deepseek` | deepseek/deepseek-v4.1-flash (OpenRouter) | cheap API | ~$0.15 / $0.60 |
+| `gemini` | google/gemini-3.8-flash (OpenRouter) | cheap API | ~$0.75 / $3.75 |
+| `claude` | anthropic/claude-sonnet-5.5 (OpenRouter) | premium API | ~$2 / $10 |
+
+\* Starting values. The *Models & data* tab refreshes prices, context sizes and abilities from
+OpenRouter's live model list (cached for a day) and flags ids that no longer exist. Model ids change
+often: check them there before your first paid run. Any other model also works by name: an Ollama tag
+(`llama3.2:3b`) or an OpenRouter id (`openrouter:vendor/model`).
+
+**Setup**: `ollama pull qwen3.5:9b` and `ollama pull gemma4:e4b`; create a key at openrouter.ai and put it
+on the **Model connection** tab (kept in memory only) or `export OPENROUTER_API_KEY=...` before
+`python run.py ui`. Without a key, Auto simply stays local.
+
+**Your SQLite database.** On *Models & data → My database*, give the path of a `.sqlite` / `.db` file and
+a note on what is in it. Then:
+* **Ask**: the **Database** button (per chat) lets the model list tables, look at columns and run
+  `SELECT` queries; answers cite the query. The table overview and your note are in the prompt.
+* **Runs**: tick *Let the agent query my database* (`--use-database`); the agent gets `db_list_tables`,
+  `db_describe_table`, `db_query`. Rows become evidence labelled *Local database*, **not independent**
+  (it is your internal data, never public support for a claim).
+* Safety: the file is opened read-only, SQLite's authorizer allows only reading, one statement per
+  call, 5 s time limit, at most 200 rows (50 shown to the model). Database data counts as private.
+* The path is stored in `runs/settings.json` (git-ignored) or set with `MEDSCOUT_DATA_DB=/path/file.db`.
 
 ### Which local model? (M4 MacBook Air, 24 GB)
 
@@ -232,6 +287,10 @@ medscout/
   control.py               run controller: gates, reviewer requests, notes, skip, pause/stop
   web/server.py            local web server + JSON API (python run.py ui)
   web/static/              browser console (index.html, app.js, app.css; no build step)
+  models/                  model list (registry.py, config/models.json), providers.py (Ollama + OpenAI-compatible /
+                           OpenRouter, streaming, tool calls, cost), router.py (Auto, privacy, cost limit), routed.py (runs)
+  localdb.py               read-only SQLite access for the AI; tools/database.py = the same as research tools
+  user_settings.py         runs/settings.json: your database path and note
   ask/                     the Ask tab: chat loop (chat.py), Ollama client, web search + page reading (web.py),
                            file reading (files.py), MedScout tools in chat (medtech.py), routes, static/ page
   harness.py               bounded ReAct loop for one research task
@@ -243,13 +302,14 @@ medscout/
   skills.py  memory.py  trace.py  intake.py  brief.py  state.py  config.py
   baselines.py  evaluation.py  mcp_server.py
   tools/                   contracts, gateway, openFDA, ClinicalTrials.gov, PubMed, local tools, mirror backend
+config/models.json         the models and the router's tables
 prompts/                   system.md (stable header), extract.md, plan.md, baseline*.md
 skills/                    claim-extraction, regulatory-check (+ references/), clinical-evidence,
                            competitive-context, commercial-signals
 data/cases/                nordleaf (ordinary), quillon (failure) — FICTIONAL, synthetic mirrors
 eval/cases.json            scenarios + reference outcomes
 tests/                     unittest suite (python run.py test), incl. controller, web API and Ask tests
-                           (Ask runs against tests/fake_ollama.py, a pretend Ollama)
+                           (Ask runs against tests/fake_ollama.py and tests/fake_openrouter.py, pretend model servers)
 ```
 
 ## Mocks, unverified parts and limitations
@@ -269,6 +329,9 @@ tests/                     unittest suite (python run.py test), incl. controller
 * Not yet integrated: CMS coverage, NIH RePORTER, patents, web pages, DOCX/PPTX, OCR, PubMed abstracts,
   De Novo database. Matching uses simple lexical rules; a retriever/reranker would help on paraphrases.
 * Token counts for the mock are estimates (chars / 4).
+* **OpenRouter and the router** were tested against a fake OpenRouter only (same request / streaming /
+  usage format as the documentation); the model ids and prices in `config/models.json` come from web
+  sources and must be checked on the *Models & data* tab. No paid call has been made.
 * **Ask** was tested against a fake Ollama and a fake search page only: real models, live DuckDuckGo
   results, Safari and the Mac-only file helpers (`sips` for HEIC photos, `textutil` for .doc/.rtf) have
   not been tried yet.

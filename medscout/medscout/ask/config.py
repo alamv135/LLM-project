@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"   # the chat page files
 
-DEFAULT_MODEL = "qwen3.5:9b"
+DEFAULT_MODEL = "auto"          # the router: local models first, API models only when needed
 CONTEXT_CHOICES = [8192, 16384, 32768, 65536, 131072]
 
 
@@ -43,6 +43,8 @@ DEFAULTS: Dict[str, Any] = {
     "web_search": True,          # let the model search the web / read pages
     "medtech": True,             # let the model use MedScout's openFDA / ClinicalTrials.gov / PubMed tools
     "medtech_backend": "live",   # "live" (the real APIs) or a demo case name (offline synthetic mirror)
+    "database": False,           # let the model read your SQLite database (set up in the console)
+    "max_cost_per_answer": 0.10, # USD an answer may spend on API models (0 = no limit)
     "search_backend": "auto",    # auto | duckduckgo | ollama
     "ollama_api_key": "",        # only for Ollama's web search API (optional)
     "custom_instructions": "",
@@ -115,7 +117,9 @@ class Settings:
                 value = None if value in (None, "") else max(0.0, min(2.0, float(value)))
             elif key == "max_tool_rounds":
                 value = max(1, min(12, int(value)))
-            elif key in ("think", "web_search", "medtech"):
+            elif key == "max_cost_per_answer":
+                value = max(0.0, min(100.0, float(value or 0)))
+            elif key in ("think", "web_search", "medtech", "database"):
                 value = bool(value)
             elif key == "medtech_backend":
                 value = str(value or "live").strip()

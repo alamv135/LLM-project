@@ -31,8 +31,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from .. import user_settings
 from ..ask.routes import AskApp
 from ..config import ROOT, Limits, Settings
+from ..localdb import DatabaseError, LocalDB
 from ..control import FLAGS, RunController
 from ..llm import LLMError, make_llm
 from ..memory import Memory
@@ -54,8 +56,9 @@ CONNECTION_ENV = {
     "azure_endpoint": "AZURE_OPENAI_ENDPOINT", "azure_api_key": "AZURE_OPENAI_API_KEY",
     "azure_api_version": "AZURE_OPENAI_API_VERSION", "ollama_host": "OLLAMA_HOST",
     "openfda_api_key": "OPENFDA_API_KEY", "ncbi_email": "NCBI_EMAIL", "ncbi_api_key": "NCBI_API_KEY",
+    "openrouter_api_key": "OPENROUTER_API_KEY",
 }
-SECRET_KEYS = {"openai_api_key", "azure_api_key", "openfda_api_key", "ncbi_api_key"}
+SECRET_KEYS = {"openai_api_key", "azure_api_key", "openfda_api_key", "ncbi_api_key", "openrouter_api_key"}
 
 
 class ApiError(Exception):
@@ -77,7 +80,7 @@ def list_cases() -> list[dict[str, Any]]:
 
 
 def editable_files() -> list[str]:
-    pats = ["prompts/*.md", "skills/*/SKILL.md", "skills/*/references/*.md", "eval/cases.json"]
+    pats = ["prompts/*.md", "skills/*/SKILL.md", "skills/*/references/*.md", "eval/cases.json", "config/models.json"]
     return sorted(str(p.relative_to(ROOT)) for pat in pats for p in ROOT.glob(pat))
 
 
@@ -95,9 +98,13 @@ def build_settings(base: Settings, body: dict[str, Any]) -> Settings:
     s = copy.deepcopy(base)
     o = body.get("settings") or {}
     if o.get("provider"):
-        if o["provider"] not in ("mock", "ollama", "openai"):
-            raise ApiError(400, "provider must be mock, ollama or openai")
+        if o["provider"] not in ("mock", "ollama", "openai", "router"):
+            raise ApiError(400, "provider must be mock, ollama, openai or router")
         s.provider = o["provider"]
+    if "allow_cloud" in o:
+        s.allow_cloud = bool(o["allow_cloud"])
+    if "use_database" in o:
+        s.use_database = bool(o["use_database"])
     if "model" in o:
         s.model = str(o["model"] or "").strip()
     if o.get("temperature") not in (None, ""):
@@ -208,6 +215,9 @@ class App:
             "tools": [{"name": s.name, "description": s.description, "input_schema": s.input_schema,
                        "independent": s.independent} for s in specs.values()],
             "connection": self.connection_view(), "active_run": active, "busy": self.busy(),
+            "models": [{"alias": m.alias, "label": m.label, "local": m.local, "tier": m.tier}
+                       for m in self.ask.router.reg.all()],
+            "database": bool(user_settings.load(self.base.runs_dir)["database_path"]),
             "runs_dir": str(self.base.runs_dir),
         }
 
@@ -296,8 +306,11 @@ class App:
             os.environ["MEDSCOUT_MOCK_FAULTS"] = mock_faults
             ctrl = RunController(**flags)
             st.config["ui"] = {"case": case, "control": flags, "faults": faults, "mock_faults": mock_faults}
-            wf = Workflow(s, st, case_dir=case_dir, echo=False, ctrl=ctrl, faults=faults,
-                          ask_fn=self._ask_fn(ctrl))
+            try:
+                wf = Workflow(s, st, case_dir=case_dir, echo=False, ctrl=ctrl, faults=faults,
+                              ask_fn=self._ask_fn(ctrl))
+            except (LLMError, KeyError) as exc:      # e.g. a cloud model chosen for private documents
+                raise ApiError(400, str(exc).strip("'\"")) from exc
             ctrl.emit = wf.tracer.event
             h = RunHandle(st, wf, ctrl)
             self.runs[st.run_id] = h
@@ -455,6 +468,70 @@ class App:
         return {"path": rel, "content": p.read_text(), "modified": time.strftime("%Y-%m-%d %H:%M:%S",
                                                                                  time.localtime(p.stat().st_mtime))}
 
+    # -------------------------------------------------------------- models, router, database
+    def models_view(self, refresh: bool = False) -> dict[str, Any]:
+        router = self.ask.router
+        reg = router.reg
+        info = [reg.refresh_local()]
+        info.append(reg.refresh_catalog(force=refresh))
+        rows = []
+        for m in reg.all():
+            ok, why = reg.available(m)
+            rows.append({**m.view(), "available": ok, "why": why})
+        return {"models": rows, "router": reg.router_cfg, "info": [i for i in info if i],
+                "openrouter_key_set": bool(os.environ.get("OPENROUTER_API_KEY"))}
+
+    def test_model(self, alias: str) -> dict[str, Any]:
+        router = self.ask.router
+        try:
+            m = router.reg.get(alias)
+            t0 = time.perf_counter()
+            res = router.provider(m).complete(m.id, [{"role": "user", "content": 'Reply with the JSON {"ok": true}.'}],
+                                              {"type": "object"}, timeout=60, max_tokens=50, think=False if m.thinking else None)
+        except (LLMError, KeyError) as exc:
+            return {"ok": False, "error": str(exc)}
+        cost = res.cost_usd if res.cost_usd is not None else m.cost(res.tokens_in, res.tokens_out)
+        return {"ok": True, "model": m.alias, "text": res.text[:200], "latency_ms": round((time.perf_counter() - t0) * 1000),
+                "tokens_in": res.tokens_in, "tokens_out": res.tokens_out, "cost_usd": round(cost, 6)}
+
+    def route_preview(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Which model would Ask's router pick for this question? (Nothing is answered.)"""
+        from ..models.router import Needs
+        router = self.ask.router
+        needs = Needs(tools=bool(body.get("tools", True)), vision=bool(body.get("images")),
+                      private=bool(body.get("private")), allow_cloud=bool(body.get("allow_cloud")),
+                      limit=float(body.get("limit") or 0))
+        try:
+            d = router.for_ask(str(body.get("question") or ""), needs, router.classifier(self.ask.settings.ollama_url()))
+        except LLMError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, **d.view()}
+
+    def database_view(self) -> dict[str, Any]:
+        cfg = user_settings.load(self.base.runs_dir)
+        out: dict[str, Any] = {**cfg, "connected": False, "tables": [],
+                               "from_env": bool(os.environ.get("MEDSCOUT_DATA_DB"))}
+        if cfg["database_path"]:
+            try:
+                db = LocalDB(cfg["database_path"])
+                out["tables"] = db.tables()
+                out["connected"], out["name"] = True, db.name
+                db.close()
+            except DatabaseError as exc:
+                out["error"] = str(exc)
+        return out
+
+    def set_database(self, body: dict[str, Any]) -> dict[str, Any]:
+        path = str(body.get("database_path") or "").strip()
+        if path:
+            try:
+                LocalDB(path).close()
+            except DatabaseError as exc:
+                raise ApiError(400, str(exc)) from exc
+        user_settings.save(self.base.runs_dir, {"database_path": path,
+                                                "database_notes": str(body.get("database_notes") or "")[:2000]})
+        return self.database_view()
+
     def write_file(self, body: dict[str, Any]) -> dict[str, Any]:
         rel = body.get("path", "")
         if rel not in editable_files():
@@ -467,6 +544,16 @@ class App:
                 json.loads(content)
             except json.JSONDecodeError as exc:
                 raise ApiError(400, f"Not valid JSON (line {exc.lineno}, column {exc.colno}): {exc.msg}") from exc
+        if rel == "config/models.json":
+            from ..models.registry import Registry
+            tmp = ROOT / "config" / ".models.check.json"
+            tmp.write_text(content)
+            try:
+                Registry(tmp, self.base.runs_dir)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ApiError(400, f"models.json problem: {exc}") from exc
+            finally:
+                tmp.unlink(missing_ok=True)
         if rel.endswith("SKILL.md") and not content.lstrip().startswith("---"):
             raise ApiError(400, "A SKILL.md must start with front matter (--- name: ... description: ... ---).")
         (ROOT / rel).write_text(content)
@@ -672,6 +759,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, h.ctrl.view())
             if method == "POST" and action == "resume":
                 return self._json(200, app.resume_run(rid, self._body()))
+        if method == "GET" and path == "/api/models":
+            return self._json(200, app.models_view(refresh=bool(q.get("refresh"))))
+        if method == "POST" and path == "/api/models/test":
+            return self._json(200, app.test_model(str(self._body().get("model") or "")))
+        if method == "POST" and path == "/api/models/route":
+            return self._json(200, app.route_preview(self._body()))
+        if path == "/api/database":
+            if method == "POST":
+                return self._json(200, app.set_database(self._body()))
+            return self._json(200, app.database_view())
         if method == "POST" and path == "/api/tool-check":
             return self._json(200, app.tool_check(self._body()))
         if method == "GET" and path == "/api/files":

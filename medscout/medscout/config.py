@@ -38,6 +38,8 @@ class Limits:
     context_window: int = 8192
     reserved_output: int = 1024
     max_records_per_observation: int = 5
+    # Cost (router provider): stop spending API money on this run after this many USD (0 = no limit)
+    max_cost_usd: float = 0.0
 
 
 @dataclass
@@ -50,6 +52,10 @@ class Settings:
     # Tool transport: "local" (in-process functions) or "mcp" (FastMCP server over stdio)
     tool_transport: str = field(default_factory=lambda: _env("MEDSCOUT_TOOL_TRANSPORT", "local"))
     interactive: bool = False
+    # Router provider: may cloud models read uploaded (private) company documents?
+    allow_cloud: bool = field(default_factory=lambda: _env("MEDSCOUT_ALLOW_CLOUD", "0") == "1")
+    # Let the agent query the user's own SQLite database (path set in the console / MEDSCOUT_DATA_DB)
+    use_database: bool = False
     # Price per million tokens, for cost accounting (set for your provider)
     price_in_per_m: float = float(_env("MEDSCOUT_PRICE_IN", "0"))
     price_out_per_m: float = float(_env("MEDSCOUT_PRICE_OUT", "0"))
@@ -66,6 +72,7 @@ class Settings:
             return self.model
         return {
             "mock": "mock-scripted-policy",
+            "router": "auto",
             "ollama": "qwen3.5:9b",       # tools + vision + thinking; ~6.6 GB, fits a 16-24 GB Mac
             "openai": "gpt-4o-mini",
         }.get(self.provider, "")

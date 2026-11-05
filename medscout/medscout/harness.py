@@ -122,6 +122,8 @@ class ResearchHarness:
                     repairs += 1
                     st.counters.format_repairs += 1
                     self.tracer.event("format_repair", task_id=task.task_id, step=step, error=str(exc))
+                    if hasattr(self.llm, "note_failure"):
+                        self.llm.note_failure("research", task.task_id)
                     history += [{"role": "assistant", "content": res.text},
                                 {"role": "user", "content": f"FORMAT_ERROR: {exc}. Follow the OUTPUT CONTRACT."}]
                     continue
@@ -160,6 +162,8 @@ class ResearchHarness:
                 if problems and revisions < L.max_verify_revisions and not last:
                     revisions += 1
                     st.counters.verify_rejections += 1
+                    if hasattr(self.llm, "note_failure"):
+                        self.llm.note_failure("research", task.task_id)
                     history.append({"role": "user", "content": "VERIFICATION_FAILED:\n- " + "\n- ".join(problems) +
                                                                "\nRevise the assessment (you may call tools first)."})
                     continue

@@ -3,6 +3,7 @@
 
   python run.py demo                                   # fictional case, offline, mock model
   python run.py run --case nordleaf --provider ollama --model qwen3.5:9b
+  python run.py run --case nordleaf --provider router --model auto --max-cost 0.50   # local first, API when needed
   python run.py run --company "Acme Med" --materials path/to/docs --product "AcmeScope" --backend live
   python run.py run --case nordleaf --focus regulatory  # changed request: regulatory claims only
   python run.py resume <run_id>
@@ -32,6 +33,10 @@ def _settings(a) -> Settings:
         if val:
             setattr(s, attr, val)
     s.interactive = bool(getattr(a, "interactive", False))
+    if getattr(a, "max_cost", None) is not None:
+        s.limits.max_cost_usd = max(0.0, a.max_cost)
+    s.allow_cloud = s.allow_cloud or bool(getattr(a, "allow_cloud", False))
+    s.use_database = bool(getattr(a, "use_database", False))
     if getattr(a, "max_steps", None):
         s.limits.max_steps_per_task = a.max_steps
     return s
@@ -161,8 +166,12 @@ def cmd_test(_a) -> None:
 
 def main() -> None:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--provider", choices=["mock", "ollama", "openai"])
-    common.add_argument("--model")
+    common.add_argument("--provider", choices=["mock", "ollama", "openai", "router"],
+                        help="router = the model list in config/models.json (--model auto or a name)")
+    common.add_argument("--model", help="with --provider router: auto, or claude / deepseek / gemini / qwen-local ...")
+    common.add_argument("--max-cost", type=float, help="router: stop spending on API models after this many USD per run")
+    common.add_argument("--allow-cloud", action="store_true", help="router: cloud models may read your own documents")
+    common.add_argument("--use-database", action="store_true", help="let the agent query your SQLite database (read-only)")
     common.add_argument("--backend", choices=["mirror", "live"], help="public-source data: offline mirror or live APIs")
     common.add_argument("--transport", choices=["local", "mcp"], help="tool transport")
     common.add_argument("--quiet", action="store_true")

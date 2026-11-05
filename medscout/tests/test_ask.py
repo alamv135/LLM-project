@@ -73,6 +73,14 @@ class AskTest(unittest.TestCase):
 
     # ----- tests ---------------------------------------------------------------------------------
     def test_status(self):
+        _, s = self.get("/api/ask/status")
+        self.assertEqual(s["model"], "auto")                      # the router is the default
+        self.assertEqual(s["download_model"], "qwen3.5:9b")      # its local classifier
+        self.assertTrue(s["model_installed"])
+        aliases = {m["alias"]: m for m in s["catalog"]}
+        self.assertTrue(aliases["qwen-local"]["available"])
+        self.assertFalse(aliases["claude"]["available"])          # no OpenRouter key in the tests
+        self.settings.update({"model": "qwen3.5:9b"})
         status, s = self.get("/api/ask/status")
         self.assertEqual(status, 200)
         self.assertTrue(s["ollama"])

@@ -32,6 +32,8 @@ class LLMResult:
     latency_ms: float
     model: str
     estimated_tokens: bool = False
+    cost_usd: float | None = None   # set when the provider reports the cost (OpenRouter) or the router computes it
+    route: str = ""                 # why the router chose this model (empty without the router)
 
 
 def estimate_tokens(text: str) -> int:
@@ -129,10 +131,16 @@ class MockLLM(BaseLLM):
                          round((time.perf_counter() - t0) * 1000, 2), self.model, True)
 
 
-def make_llm(settings) -> BaseLLM:
+def make_llm(settings, private: bool = False) -> BaseLLM:
+    """private: the run reads the user's own documents (they stay on local models unless allowed)."""
+    if settings.provider == "router":
+        from .models import shared_router
+        from .models.routed import RoutedLLM
+        return RoutedLLM(shared_router(settings), settings.default_model(), settings.temperature, private=private,
+                         allow_cloud=settings.allow_cloud, max_cost=settings.limits.max_cost_usd)
     cls = {"mock": MockLLM, "ollama": OllamaLLM, "openai": OpenAICompatLLM}.get(settings.provider)
     if cls is None:
-        raise ValueError(f"unknown provider {settings.provider!r}; use mock | ollama | openai")
+        raise ValueError(f"unknown provider {settings.provider!r}; use mock | ollama | openai | router")
     return cls(settings.default_model(), settings.temperature)
 
 
@@ -144,11 +152,16 @@ def call_model(llm: BaseLLM, messages: list[dict[str, str]], *, state, tracer, s
     last: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            res = llm.complete(messages, schema)
+            if getattr(llm, "routed", False):
+                res = llm.complete(messages, schema, purpose=purpose, task_id=task_id, spent=state.counters.cost_usd)
+            else:
+                res = llm.complete(messages, schema)
             break
         except LLMError as exc:
             last = exc
             tracer.event("model_error", purpose=purpose, task_id=task_id, attempt=attempt + 1, error=str(exc))
+            if getattr(exc, "final", False):        # cost limit / privacy: retrying cannot help
+                raise
             time.sleep(1.0 * (attempt + 1))
     else:
         raise LLMError(str(last))
@@ -156,10 +169,12 @@ def call_model(llm: BaseLLM, messages: list[dict[str, str]], *, state, tracer, s
     c.model_calls += 1
     c.tokens_in += res.tokens_in
     c.tokens_out += res.tokens_out
-    cost = (res.tokens_in * settings.price_in_per_m + res.tokens_out * settings.price_out_per_m) / 1e6
+    cost = res.cost_usd if res.cost_usd is not None else \
+        (res.tokens_in * settings.price_in_per_m + res.tokens_out * settings.price_out_per_m) / 1e6
     c.cost_usd = round(c.cost_usd + cost, 6)
     tracer.event("model_call", purpose=purpose, task_id=task_id, step=step, model=res.model,
                  context_tokens=ctx_tokens, tokens_in=res.tokens_in, tokens_out=res.tokens_out,
                  estimated_tokens=res.estimated_tokens, latency_ms=res.latency_ms, cost_usd=round(cost, 6),
+                 route=res.route,
                  output=res.text[:2000])
     return res

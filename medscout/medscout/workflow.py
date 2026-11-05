@@ -63,19 +63,33 @@ class Workflow:
         from .trace import Tracer
         self.tracer = Tracer(self.run_dir / "trace.jsonl", state.run_id, echo)
         self.skills = SkillLibrary(settings.skills_dir)
-        self.specs = build_specs()
+        self.database = None
+        if settings.use_database or state.config.get("use_database"):
+            from .localdb import DatabaseError
+            from .user_settings import open_database
+            try:
+                self.database = open_database(settings.runs_dir)
+            except DatabaseError as exc:
+                self.tracer.event("warning", phase="setup", message=f"database not available: {exc}")
+        self.specs = build_specs(include_database=self.database is not None)
+        # Uploaded documents and the user's database are private; demo cases are fictional.
+        private = bool(state.config.get("private", case_dir is None or self.database is not None))
         mirror = state.config.get("mirror_dir") or (
             str(case_dir / "public_mirror") if case_dir and (case_dir / "public_mirror").exists() else "")
+        state.config.update(private=private, use_database=self.database is not None, allow_cloud=settings.allow_cloud)
         state.config.update(provider=settings.provider, model=settings.default_model(), backend=settings.backend,
                             tool_transport=settings.tool_transport, mirror_dir=mirror,
                             limits=vars(self.L))
         self.tool_ctx = ToolContext(backend=settings.backend, mirror_dir=Path(mirror) if mirror else None,
                                     chunks=state.chunks, evidence=state.evidence, skills=self.skills,
-                                    cache=self.memory, timeout_s=self.L.tool_timeout_s)
+                                    cache=self.memory, timeout_s=self.L.tool_timeout_s, database=self.database,
+                                    database_notes=_db_notes(settings) if self.database else "")
         mcp_args = ["--backend", settings.backend] + (["--mirror", mirror] if mirror else [])
         self.gateway = ToolGateway(self.specs, self.tool_ctx, state, self.L, self.tracer,
                                    transport=settings.tool_transport, mcp_server_args=mcp_args, faults=faults)
-        self.llm = make_llm(settings)
+        self.llm = make_llm(settings, private=private)
+        if hasattr(self.llm, "preflight"):
+            self.llm.preflight()        # e.g. a cloud model chosen for private documents: stop now, not later
         system = render((settings.prompts_dir / "system.md").read_text(),
                         TOOL_CATALOG=catalog_text(self.specs), SKILL_INDEX=self.skills.index_text(),
                         VERDICTS=", ".join(VERDICTS))
@@ -114,6 +128,8 @@ class Workflow:
         finally:
             self.gateway.close()
             self.memory.close()
+            if self.database is not None:
+                self.database.close()
         return st
 
     def checkpoint(self) -> None:
@@ -136,6 +152,8 @@ class Workflow:
             except ProtocolError as exc:
                 self.state.counters.format_repairs += 1
                 self.tracer.event("format_repair", phase=purpose, error=str(exc))
+                if hasattr(self.llm, "note_failure"):
+                    self.llm.note_failure(purpose)
                 msgs = msgs + [{"role": "assistant", "content": res.text},
                                {"role": "user", "content": f"FORMAT_ERROR: {exc}. Return only the JSON object."}]
         return None
@@ -392,6 +410,11 @@ class Workflow:
         self.tracer.event("phase", phase="brief", path=str(self.run_dir / "brief.md"))
 
 
+def _db_notes(settings) -> str:
+    from .user_settings import load
+    return load(settings.runs_dir)["database_notes"]
+
+
 def load_for_resume(settings, run_id: str) -> RunState:
     """Load a checkpoint and restore the configuration the run started with (provider, backend, limits)."""
     mem = Memory(settings.db_path)
@@ -404,6 +427,8 @@ def load_for_resume(settings, run_id: str) -> RunState:
     settings.model = st.config.get("model", settings.model)
     settings.backend = st.config.get("backend", settings.backend)
     settings.tool_transport = st.config.get("tool_transport", settings.tool_transport)
+    settings.allow_cloud = bool(st.config.get("allow_cloud", settings.allow_cloud))
+    settings.use_database = bool(st.config.get("use_database", settings.use_database))
     for k, v in (st.config.get("limits") or {}).items():
         if hasattr(settings.limits, k):
             setattr(settings.limits, k, v)
