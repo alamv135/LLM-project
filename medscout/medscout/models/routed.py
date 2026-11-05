@@ -66,7 +66,7 @@ class RoutedLLM(BaseLLM):
                 errors.append(f"{m.alias}: {exc}")
                 continue
             if res.cost_usd is None:
-                res.cost_usd = m.cost(res.tokens_in, res.tokens_out)
+                res.cost_usd = m.cost(res.tokens_in, res.tokens_out, res.cached_tokens)
             res.model = m.alias
             res.route = decision.reason if i == 0 else f"fallback after {'; '.join(errors)[:300]}"
             return res

@@ -5,7 +5,13 @@
                                     stream=true  -> scripted chat: "search" -> a web_search tool call
                                     split over several chunks; after a tool result -> an answer citing [1]
 Every answer reports usage with a cost, as OpenRouter does. Requests are kept in FakeOpenRouter.requests.
-Under /deepseek/ it plays DeepSeek's own API instead: models deepseek-v4-flash / -pro, usage WITHOUT a cost.
+Under /deepseek/ it plays DeepSeek's own API, with its documented quirks:
+  * usage has no cost but reports prompt_cache_hit_tokens
+  * JSON mode needs the word "json" in the prompt (else HTTP 400); content is padded with spaces;
+    it sometimes returns EMPTY content (FakeOpenRouter.deepseek_empty = how many times next)
+  * a max_tokens of 10 or less cuts the answer off (finish_reason "length")
+  * streamed answers start with reasoning_content; an assistant tool-call message sent back without
+    its reasoning_content is refused with HTTP 400
 """
 from __future__ import annotations
 
@@ -46,6 +52,7 @@ class QuietServer(ThreadingHTTPServer):
 class FakeOpenRouter(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     requests: List[Dict[str, Any]] = []
+    deepseek_empty = 0
 
     def log_message(self, *a: Any) -> None:
         pass
@@ -77,16 +84,35 @@ class FakeOpenRouter(BaseHTTPRequestHandler):
             return self._json({"error": {"message": "No auth credentials found"}}, 401)
         if body.get("model") not in (DEEPSEEK_MODELS if direct else {m["id"] for m in CATALOG["data"]}):
             return self._json({"error": {"message": "model not found"}}, 404)
-        usage = {"prompt_tokens": 300, "completion_tokens": 40}
-        if not direct:
+        usage: Dict[str, Any] = {"prompt_tokens": 300, "completion_tokens": 40}
+        if direct:
+            usage.update(prompt_cache_hit_tokens=200, prompt_cache_miss_tokens=100)
+            if (body.get("response_format") or {}).get("type") == "json_object" and \
+                    "json" not in json.dumps(body["messages"]).lower():
+                return self._json({"error": {"message": "Prompt must contain the word 'json' in some form to use "
+                                                        "'response_format' of type 'json_object'.", "type": "invalid_request_error"}}, 400)
+            for m in body["messages"]:
+                if m.get("role") == "assistant" and m.get("tool_calls") and "reasoning_content" not in m:
+                    return self._json({"error": {"message": "Missing `reasoning_content` field in the assistant "
+                                                            "message", "type": "invalid_request_error"}}, 400)
+        else:
             usage["cost"] = COST
         if not body.get("stream"):
             from medscout import mock_policy
             msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else ""}
                     for m in body["messages"]]
-            text = mock_policy.respond(msgs)
-            return self._json({"model": body["model"], "usage": usage,
-                               "choices": [{"message": {"role": "assistant", "content": text}}]})
+            text, finish = mock_policy.respond(msgs), "stop"
+            if direct:
+                if FakeOpenRouter.deepseek_empty > 0:
+                    FakeOpenRouter.deepseek_empty -= 1
+                    text = ""
+                elif (body.get("max_tokens") or 9999) <= 10:
+                    text, finish = text[:15], "length"
+                else:
+                    text = "\n  " + text + "  \n"
+            return self._json({"model": body["model"], "usage": usage, "choices": [
+                {"message": {"role": "assistant", "content": text,
+                             **({"reasoning_content": "Let me think."} if direct else {})}, "finish_reason": finish}]})
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
@@ -108,6 +134,8 @@ class FakeOpenRouter(BaseHTTPRequestHandler):
             " ".join(p.get("text", "") for p in user.get("content") or [] if isinstance(p, dict))
         tools = {t["function"]["name"] for t in body.get("tools") or []}
         send(None)
+        if direct:
+            send(delta({"role": "assistant", "reasoning_content": "DeepSeek thinks first. "}))
         if last["role"] == "tool":
             send(delta({"role": "assistant", "content": "Cloud answer from the results "}))
             send(delta({"content": "[1]."}, "stop"))

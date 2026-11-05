@@ -615,7 +615,8 @@ class ChatService:
             if chunk.get("done"):
                 cost = chunk.get("cost")
                 if cost is None:
-                    cost = m.cost(int(chunk.get("prompt_eval_count") or 0), int(chunk.get("eval_count") or 0))
+                    cost = m.cost(int(chunk.get("prompt_eval_count") or 0), int(chunk.get("eval_count") or 0),
+                                  int(chunk.get("cached_tokens") or 0))
                 turn.spent += float(cost)
                 stats["eval_count"] += int(chunk.get("eval_count") or 0)
                 stats["eval_ms"] += int(chunk.get("eval_duration") or 0) / 1e6

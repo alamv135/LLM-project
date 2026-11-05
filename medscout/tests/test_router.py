@@ -180,6 +180,59 @@ class TestDeepSeekDirect(RouterBase):
         self.assertIn("deepseek-v4-flash", "".join(c["message"].get("content", "") for c in chunks))
         self.assertIsNone(chunks[-1]["cost"])
 
+    def test_deepseek_quirks(self):
+        os.environ["DEEPSEEK_API_KEY"] = "ds-key"
+        m = self.reg.get("deepseek-direct")
+        p = self.router.provider(m)
+        msgs = [{"role": "system", "content": "Return one JSON object."},
+                {"role": "user", "content": "PHASE: plan\nCLAIMS_JSON:\n[]\nEND_CLAIMS"}]
+        res = p.complete(m.id, msgs, {"type": "object"})
+        self.assertTrue(res.text.startswith("{") and res.text.endswith("}"))      # padding removed
+        self.assertEqual(res.cached_tokens, 200)
+        self.assertAlmostEqual(m.cost(res.tokens_in, res.tokens_out, res.cached_tokens), (300 * 0.14 + 40 * 0.28) / 1e6)
+        m.price_cache_in = 0.014                                                 # once you set a cache price
+        self.assertAlmostEqual(m.cost(300, 40, 200), (100 * 0.14 + 200 * 0.014 + 40 * 0.28) / 1e6)
+        # empty content once: asked again automatically; twice: a clear error
+        fake_openrouter.FakeOpenRouter.deepseek_empty = 1
+        self.assertTrue(p.complete(m.id, msgs, {"type": "object"}).text.startswith("{"))
+        fake_openrouter.FakeOpenRouter.deepseek_empty = 2
+        with self.assertRaisesRegex(Exception, "empty content"):
+            p.complete(m.id, msgs, {"type": "object"})
+        fake_openrouter.FakeOpenRouter.deepseek_empty = 0
+        with self.assertRaisesRegex(Exception, "cut off"):
+            p.complete(m.id, msgs, {"type": "object"}, max_tokens=5)
+        with self.assertRaisesRegex(Exception, "must contain the word 'json'"):
+            p.complete(m.id, [{"role": "user", "content": "plan please"}], {"type": "object"})
+
+    def test_deepseek_router_falls_back_after_empty_answers(self):
+        os.environ["DEEPSEEK_API_KEY"] = "ds-key"
+        from medscout.models.routed import RoutedLLM
+        llm = RoutedLLM(self.router, "auto")
+        fake_openrouter.FakeOpenRouter.deepseek_empty = 2
+        res = llm.complete([{"role": "system", "content": "JSON only"}, {"role": "user", "content": "PHASE: plan\nCLAIMS_JSON:\n[]\nEND_CLAIMS"}],
+                           {"type": "object"}, purpose="plan")
+        self.assertEqual(res.model, "deepseek")                                   # next in the list: via OpenRouter
+        self.assertIn("fallback", res.route)
+
+    def test_deepseek_thinking_with_tools_in_ask(self):
+        os.environ["DEEPSEEK_API_KEY"] = "ds-key"
+        p = self.router.provider(self.reg.get("deepseek-direct"))
+        tool_def = [{"type": "function", "function": {"name": "web_search", "parameters": {}}}]
+        first = list(p.stream({"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": "search it"}], "tools": tool_def}))
+        thinking = "".join(c["message"].get("thinking", "") for c in first)
+        self.assertEqual(thinking, "DeepSeek thinks first. ")
+        call = next(c for c in first if c["message"].get("tool_calls"))["message"]["tool_calls"][0]
+        history = [{"role": "user", "content": "search it"},
+                   {"role": "assistant", "content": "", "thinking": thinking, "tool_calls": [call]},
+                   {"role": "tool", "tool_name": "web_search", "tool_call_id": call["id"], "content": "[1] result"}]
+        second = list(p.stream({"model": "deepseek-v4-flash", "messages": history, "tools": tool_def}))
+        self.assertIn("[1]", "".join(c["message"].get("content", "") for c in second))
+        sent = self.cloud_calls()[-1]["messages"][1]
+        self.assertEqual(sent["reasoning_content"], "DeepSeek thinks first. ")    # sent back, as DeepSeek requires
+        # OpenRouter never receives that field
+        list(self.router.provider(self.reg.get("deepseek")).stream({"model": "deepseek/deepseek-v4.1-flash", "messages": history, "tools": tool_def}))
+        self.assertNotIn("reasoning_content", self.cloud_calls()[-1]["messages"][1])
+
     def test_model_id_check_and_names(self):
         os.environ["DEEPSEEK_API_KEY"] = "ds-key"
         self.reg.models["deepseek-direct"].id = "deepseek-chat"                # an old, retired name
@@ -390,6 +443,19 @@ class TestAskThroughRouter(RouterBase):
         self.assertEqual(second[-1]["tool_call_id"], "call_abc")
         self.assertIn("[1]", events[-1]["message"]["content"])
         self.assertAlmostEqual(events[-1]["message"]["stats"]["cost_usd"], 2 * fake_openrouter.COST)
+
+    def test_deepseek_direct_tool_round_in_ask(self):
+        os.environ["DEEPSEEK_API_KEY"] = "ds-key"
+        self.ask.settings.update({"model": "deepseek-direct"})
+        events = self.send(text="search for the latest Ollama news", web_search=True)
+        self.assertIsNone(events[-1]["message"]["error"])
+        self.assertEqual(next(e for e in events if e["type"] == "tool_end")["ok"], True)
+        self.assertIn("DeepSeek thinks first.", "".join(e["text"] for e in events if e["type"] == "thinking"))
+        self.assertIn("[1]", events[-1]["message"]["content"])
+        sent = self.cloud_calls()[-1]
+        self.assertEqual(sent["_path"], "/deepseek/chat/completions")
+        self.assertIn("reasoning_content", next(m for m in sent["messages"] if m.get("tool_calls")))
+        self.assertAlmostEqual(events[-1]["message"]["stats"]["cost_usd"], 2 * (300 * 0.14 + 40 * 0.28) / 1e6, places=6)
 
     def test_private_files_stay_local_unless_allowed(self):
         _, raw = self.request("POST", "/api/ask/upload", raw=b"Confidential term sheet", headers={"X-Filename": "terms.txt"})

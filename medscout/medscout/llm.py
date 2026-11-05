@@ -34,6 +34,7 @@ class LLMResult:
     estimated_tokens: bool = False
     cost_usd: float | None = None   # set when the provider reports the cost (OpenRouter) or the router computes it
     route: str = ""                 # why the router chose this model (empty without the router)
+    cached_tokens: int = 0          # input tokens served from the provider's prompt cache (cheaper)
 
 
 def estimate_tokens(text: str) -> int:

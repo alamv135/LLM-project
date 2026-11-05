@@ -25,7 +25,7 @@ pip install -r requirements.txt
 ```bash
 python run.py ui --open                 # web interface + run controller at http://127.0.0.1:8765
 python run.py demo                      # same agent from the terminal: fictional Nordleaf Cardio case, offline
-python run.py test                      # 110 unit/integration tests, no model or network needed
+python run.py test                      # 114 unit/integration tests, no model or network needed
 python run.py eval                      # 4 scenarios x {medscout, direct, rag} -> eval/results/
 ```
 
@@ -153,6 +153,18 @@ API, without OpenRouter). A model whose key is missing is skipped, so the router
 OpenRouter. Without any key, Auto simply stays local. DeepSeek's API does not report a cost, so MedScout
 computes it from the prices in `config/models.json`; the *Models & data* tab checks the model id against
 DeepSeek's live model list (`deepseek:<id>` also works as a name, e.g. `deepseek:deepseek-v4-pro`).
+
+**DeepSeek's differences, and how they are handled** (provider options in `config/models.json`):
+
+| DeepSeek behaviour | What MedScout does |
+|---|---|
+| JSON mode needs the word "json" in the prompt | MedScout's prompts always say "JSON" |
+| JSON mode sometimes returns **empty** content; content may be padded with spaces | `empty_json_retries: 1` asks once more; padding is stripped; still empty → the router moves to the next model in the list (logged in the trace) |
+| No JSON-schema mode | `json_object` mode, then MedScout's own schema check and one format repair |
+| Long JSON cut off at `max_tokens` | clear "cut off" error instead of broken JSON; `max_output_tokens` is 4096 |
+| Thinking text comes in a separate `reasoning_content` field | shown as "Thinking" in Ask, never parsed as the answer |
+| During a tool-calling turn, earlier `reasoning_content` must be sent back (else HTTP 400) | `reasoning_field: "reasoning_content"` sends it back on tool-call messages (only to DeepSeek) |
+| No cost in the usage report; cached input tokens are cheaper (`prompt_cache_hit_tokens`) | cost computed from the prices; set `price_cache_in` once you know DeepSeek's cache-hit price (until then cached tokens are charged at the full price, so the cost limit errs on the safe side) |
 
 **Your SQLite database.** On *Models & data → My database*, give the path of a `.sqlite` / `.db` file and
 a note on what is in it. Then:

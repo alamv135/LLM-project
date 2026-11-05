@@ -86,7 +86,9 @@ class Router:
         if m.kind == "ollama":
             return OllamaProvider(ollama_url or self.reg.base_url(m.provider))
         p = self.reg.providers.get(m.provider) or {}
-        return OpenAIProvider(self.reg.base_url(m.provider), self.reg.api_key(m.provider), bool(p.get("openrouter")))
+        return OpenAIProvider(self.reg.base_url(m.provider), self.reg.api_key(m.provider), bool(p.get("openrouter")),
+                              reasoning_field=p.get("reasoning_field", ""),
+                              empty_json_retries=int(p.get("empty_json_retries", 0)))
 
     @property
     def max_out(self) -> int:

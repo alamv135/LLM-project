@@ -64,10 +64,15 @@ class OllamaProvider:
 class OpenAIProvider:
     kind = "openai"
 
-    def __init__(self, base_url: str, api_key: str = "", openrouter: bool = False):
+    def __init__(self, base_url: str, api_key: str = "", openrouter: bool = False, reasoning_field: str = "",
+                 empty_json_retries: int = 0):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.openrouter = openrouter
+        # DeepSeek: earlier "reasoning_content" must be sent back while a tool-calling turn continues
+        self.reasoning_field = reasoning_field
+        # DeepSeek: JSON mode "may occasionally return empty content" -> ask again this many times
+        self.empty_json_retries = empty_json_retries
 
     def _headers(self) -> dict[str, str]:
         h = {}
@@ -81,7 +86,8 @@ class OpenAIProvider:
     def complete(self, model_id: str, messages: list[dict[str, Any]], schema: dict[str, Any] | None = None, *,
                  temperature: float = 0.0, timeout: float = 120.0, num_ctx: int | None = None,
                  think: bool | None = None, max_tokens: int | None = None, json_schema: bool = False) -> LLMResult:
-        body: dict[str, Any] = {"model": model_id, "messages": to_openai(messages), "temperature": temperature}
+        body: dict[str, Any] = {"model": model_id, "messages": to_openai(messages, self.reasoning_field),
+                                "temperature": temperature}
         if max_tokens:
             body["max_tokens"] = max_tokens
         if schema:
@@ -92,24 +98,37 @@ class OpenAIProvider:
             if think is not None:
                 body["reasoning"] = {"enabled": bool(think)}
         t0 = time.perf_counter()
-        data = _call(self.base_url + "/chat/completions", body, self._headers(), timeout)
-        try:
-            msg = data["choices"][0]["message"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise LLMError(f"unexpected response shape: {str(data)[:200]}") from exc
-        usage = data.get("usage") or {}
-        text = msg.get("content") or ""
-        if isinstance(text, list):          # some providers return content parts
-            text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
-        return LLMResult(text, int(usage.get("prompt_tokens") or messages_tokens(messages)),
-                         int(usage.get("completion_tokens") or estimate_tokens(text)),
+        tokens_in = tokens_out = cached = 0
+        for attempt in range(1 + (self.empty_json_retries if schema else 0)):
+            data = _call(self.base_url + "/chat/completions", body, self._headers(), timeout)
+            try:
+                choice = data["choices"][0]
+                msg = choice["message"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise LLMError(f"unexpected response shape: {str(data)[:200]}") from exc
+            usage = data.get("usage") or {}
+            tokens_in += int(usage.get("prompt_tokens") or messages_tokens(messages))
+            tokens_out += int(usage.get("completion_tokens") or 0)
+            cached += int(usage.get("prompt_cache_hit_tokens") or 0)
+            text = msg.get("content") or ""
+            if isinstance(text, list):          # some providers return content parts
+                text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
+            if choice.get("finish_reason") == "length" and schema:
+                raise LLMError(f"the answer was cut off at max_tokens={max_tokens}; the JSON is incomplete "
+                               "(raise max_output_tokens in config/models.json)")
+            if text.strip() or not schema:
+                break
+        if schema and not text.strip():
+            raise LLMError("the model returned empty content in JSON mode (a known DeepSeek behaviour)")
+        return LLMResult(text.strip(), tokens_in, tokens_out or estimate_tokens(text),
                          round((time.perf_counter() - t0) * 1000, 1), data.get("model") or model_id,
-                         estimated_tokens=not usage, cost_usd=_float(usage.get("cost")))
+                         estimated_tokens=not usage, cost_usd=_float(usage.get("cost")), cached_tokens=cached)
 
     def stream(self, body: dict[str, Any], cancel: Any = None) -> Iterator[dict[str, Any]]:
         """Streamed chat (Server-Sent Events), translated into Ollama-style chunks."""
         options = body.get("options") or {}
-        payload: dict[str, Any] = {"model": body["model"], "messages": to_openai(body["messages"]), "stream": True,
+        payload: dict[str, Any] = {"model": body["model"], "messages": to_openai(body["messages"], self.reasoning_field),
+                                   "stream": True,
                                    "stream_options": {"include_usage": True}}
         if options.get("temperature") is not None:
             payload["temperature"] = options["temperature"]
@@ -166,7 +185,8 @@ class OpenAIProvider:
             yield {"message": {"role": "assistant", "content": ""}, "done": True,
                    "prompt_eval_count": int(usage.get("prompt_tokens") or 0),
                    "eval_count": int(usage.get("completion_tokens") or 0),
-                   "eval_duration": int((time.perf_counter() - t0) * 1e9), "cost": _float(usage.get("cost"))}
+                   "eval_duration": int((time.perf_counter() - t0) * 1e9), "cost": _float(usage.get("cost")),
+                   "cached_tokens": int(usage.get("prompt_cache_hit_tokens") or 0)}
         except (OSError, http.client.HTTPException) as exc:
             if cancel is not None and getattr(cancel, "cancelled", False):
                 raise Cancelled() from exc
@@ -206,8 +226,10 @@ def _sse_events(resp: http.client.HTTPResponse, cancel: Any) -> Iterator[dict[st
             pass
 
 
-def to_openai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Ollama-style messages (images as base64 list, tool_calls with dict arguments) -> OpenAI format."""
+def to_openai(messages: list[dict[str, Any]], reasoning_field: str = "") -> list[dict[str, Any]]:
+    """Ollama-style messages (images as base64 list, tool_calls with dict arguments) -> OpenAI format.
+    reasoning_field: for providers that need the model's earlier reasoning back on tool-call messages
+    (DeepSeek: "reasoning_content"); others never see it."""
     out = []
     for m in messages:
         role = m.get("role")
@@ -215,11 +237,14 @@ def to_openai(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             out.append({"role": "tool", "tool_call_id": m.get("tool_call_id") or "", "content": m.get("content", "")})
             continue
         if role == "assistant" and m.get("tool_calls"):
-            out.append({"role": "assistant", "content": m.get("content") or None, "tool_calls": [
+            msg: dict[str, Any] = {"role": "assistant", "content": m.get("content") or None, "tool_calls": [
                 {"id": c.get("id") or f"call_{i}", "type": "function",
                  "function": {"name": (c.get("function") or {}).get("name", ""),
                               "arguments": json.dumps((c.get("function") or {}).get("arguments") or {})}}
-                for i, c in enumerate(m["tool_calls"])]})
+                for i, c in enumerate(m["tool_calls"])]}
+            if reasoning_field:
+                msg[reasoning_field] = m.get("thinking") or ""
+            out.append(msg)
             continue
         if m.get("images"):
             parts: list[dict[str, Any]] = [{"type": "text", "text": m.get("content", "")}]

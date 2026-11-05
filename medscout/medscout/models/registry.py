@@ -36,6 +36,7 @@ class ModelInfo:
     local: bool = True
     price_in: float = 0.0          # USD per 1M input tokens
     price_out: float = 0.0         # USD per 1M output tokens
+    price_cache_in: float | None = None   # USD per 1M cached input tokens (None = same as price_in)
     context: int = 8192
     tools: bool = True
     vision: bool = False
@@ -43,8 +44,10 @@ class ModelInfo:
     json_schema: bool = False      # provider enforces a JSON schema (structured outputs)
     notes: list[str] = field(default_factory=list)
 
-    def cost(self, tokens_in: int, tokens_out: int) -> float:
-        return (tokens_in * self.price_in + tokens_out * self.price_out) / 1e6
+    def cost(self, tokens_in: int, tokens_out: int, cached: int = 0) -> float:
+        cached = min(max(0, cached), tokens_in)
+        cache_price = self.price_in if self.price_cache_in is None else self.price_cache_in
+        return ((tokens_in - cached) * self.price_in + cached * cache_price + tokens_out * self.price_out) / 1e6
 
     def view(self) -> dict[str, Any]:
         return asdict(self)
@@ -73,6 +76,7 @@ class Registry:
                 alias=alias, provider=m["provider"], kind=kind, id=str(m["id"]), label=m.get("label") or m["id"],
                 tier=int(m.get("tier", 0 if kind == "ollama" else 1)), local=kind == "ollama",
                 price_in=float(m.get("price_in", 0)), price_out=float(m.get("price_out", 0)),
+                price_cache_in=float(m["price_cache_in"]) if m.get("price_cache_in") is not None else None,
                 context=int(m.get("context", 8192)), tools=bool(m.get("tools", True)),
                 vision=bool(m.get("vision", False)), thinking=bool(m.get("thinking", False)),
                 json_schema=bool(m.get("json_schema", kind == "ollama")))
